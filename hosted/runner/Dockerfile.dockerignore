@@ -1,0 +1,8 @@
+# Only what the build stage copies: package.json, bun.lock, tsconfig.json, src/.
+*
+!package.json
+!bun.lock
+!tsconfig.json
+!src/**
+src/**/*.test.ts
+src/**/__fixtures__

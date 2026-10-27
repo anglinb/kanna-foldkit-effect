@@ -295,22 +295,55 @@ ever hosted: they make every IO edge fakeable in tests.
 Locally, all on one laptop:
 
 ```sh
-# 1. The machine
-KANNA_RUNNER_TOKEN=secret bun run runner -- --port 17420
+# 1. The machine: the runner image (or `bun run runner` from a checkout)
+docker build -f hosted/runner/Dockerfile -t kanna-runner .
+docker run -d --name kanna-runner -p 127.0.0.1:7420:7420 \
+  -e KANNA_RUNNER_TOKEN=secret -v kanna-home:/home/kanna kanna-runner
 
 # 2a. The server on Bun, with the runner as its machine
-KANNA_RUNNER_URL=ws://127.0.0.1:17420 KANNA_RUNNER_TOKEN=secret \
+KANNA_RUNNER_URL=ws://127.0.0.1:7420 KANNA_RUNNER_TOKEN=secret \
   KANNA_DATA_ROOT_NAME=.kanna-hosted-dev bun run dev --port 5184
 
 # 2b. Or the server in a Durable Object (local workerd)
 bun run build:client
-printf 'KANNA_RUNNER_URL=ws://127.0.0.1:17420\nKANNA_RUNNER_TOKEN=secret\nKANNA_PASSWORD=pw\n' > hosted/.dev.vars
+printf 'KANNA_RUNNER_URL=ws://127.0.0.1:7420\nKANNA_RUNNER_TOKEN=secret\nKANNA_PASSWORD=pw\n' > hosted/.dev.vars
 bun run hosted:dev          # http://127.0.0.1:18787
 ```
 
-Deploying is `wrangler deploy -c hosted/wrangler.jsonc` with the three
-secrets set, and a runner the object can reach over `wss://`: a container
-next to it, or `cloudflared` in front of a laptop's runner.
+The image (`hosted/runner/Dockerfile`) is Node 22 + Bun, git, gh, ripgrep,
+lsof/procps, and the Claude Code and Codex CLIs (`--build-arg
+INSTALL_CURSOR=true` adds Cursor's), running as the non-root `kanna` user.
+`/home/kanna` is the volume: repos, CLI logins and Kanna's account config
+dirs. A fresh container has no CLI logins; sign in from Settings →
+Providers (the login flows run on the runner's PTY) or with `docker exec -it
+kanna-runner claude`. `hosted/runner/setup.sh` installs the same tools on a
+Debian/Ubuntu machine without Docker.
+
+Deploying is `wrangler deploy -c hosted/wrangler.jsonc` with the secrets set
+(`KANNA_RUNNER_URL`, `KANNA_RUNNER_TOKEN`, `KANNA_PASSWORD`; optionally
+`KANNA_RUNNER_HOME`, `KANNA_IDLE_SECONDS`), and a runner the object can
+reach over `wss://`: a container next to it, or `cloudflared` in front of a
+laptop's runner.
+
+## How the hosted object behaves
+
+- **Without the runner.** Kanna starts from the runner's last-known facts
+  (kept in the object's SQLite) and its own files live under `/kanna`, so
+  the sidebar, transcripts and settings load whether or not the runner is
+  up. Machine calls fail at once while it's down (`MachineOfflineError`); a
+  call made while a connection is opening waits for it, up to 5 s.
+- **Sleeping.** After `KANNA_IDLE_SECONDS` (300) with no request or socket
+  message and no turn or terminal running, the object stops Kanna, closing
+  its runner connection and every timer, and sets an alarm for the next
+  schedule. Browser sockets stay open through the hibernation API and their
+  `kanna:ping` heartbeat is answered by the runtime, so an open tab doesn't
+  wake it. The next message wakes it: a new server binds the sockets again,
+  replays their subscriptions, and handles the message (~30-90 ms with the
+  runner up). Password sessions are kept in SQLite, so a sleep signs no one
+  out.
+- **Pi** is left out of the hosted build (`disabledProviders`, and its SDK
+  aliased to a stub): it runs its tools in-process, which here would be
+  inside the object.
 
 ## Gaps
 
@@ -320,25 +353,19 @@ In rough order of what breaks first:
    `http://127.0.0.1:<port>/mcp` (`kanna-mcp.ts`). Hosted, that port is a
    virtual one inside the object, and the CLIs run on the runner. Needs the
    runner to listen locally and forward to the host's
-   `DurableObjectHttpHost.serve(request, port)`: a second, host-served RPC
-   group over the same socket, or HTTP over the existing one. Claude is
-   unaffected (its Kanna tools are in-process SDK MCP servers).
-2. **Pi** runs in-process and executes its own tools, so hosted it would
-   run them inside the object. Hide it in the hosted build, or move the Pi
-   adapter into the runner and stream `HarnessEvent`s.
-3. **The object's lifetime.** No WebSocket hibernation: the object stays in
-   memory while a browser is connected. If it is evicted, in-flight turns
-   are lost without the `resumePending` marker (eviction doesn't run
-   shutdown), the runner kills their processes when the connection drops,
-   and login sessions (in memory) need a new login. Alarms should replace
-   timers for schedules.
-4. **Runner connection.** Startup fails if the runner is down (the next
-   request retries). After startup the socket reconnects, but calls in
-   flight fail and running processes die with the old connection.
-5. **Cold start.** About 8.5 s in local workerd, before the first request is
-   answered.
-6. **Tenancy.** One object (`idFromName("default")`), one runner, one
+   `DurableObjectHttpHost.serve(request, port)`. Claude is unaffected (its
+   Kanna tools are in-process SDK MCP servers).
+2. **Eviction mid-turn.** Sleeping only happens when idle, but the platform
+   can still evict a busy object (deploys, failures). In-flight turns are
+   then lost without the `resumePending` marker, and the runner kills their
+   processes when the connection drops.
+3. **Chattiness.** Discovery no longer blocks boot, but it still makes
+   thousands of round trips when it runs, as do other whole-tree reads.
+   Those want runner-side RPCs (one call, one answer) when they matter.
+4. **Cold start** on real Cloudflare: module load of the 7.8 MB bundle on
+   each wake from eviction is unmeasured (local workerd doesn't evict).
+5. **Tenancy.** One object (`idFromName("default")`), one runner, one
    token, one password.
-7. **Phase 4 proper.** Kanna's state is still files, in SQLite. Domain
+6. **Phase 4 proper.** Kanna's state is still files, in SQLite. Domain
    stores (`EventLog`, `TranscriptStore`, media in R2) are the real shape;
    `RoutedFileSystem` keeps everything working until then.
