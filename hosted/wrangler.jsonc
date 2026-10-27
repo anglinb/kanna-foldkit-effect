@@ -1,0 +1,32 @@
+{
+  // Hosted Kanna: the server in a Durable Object, the client as static
+  // assets, the machine at a runner (`bun src/server/runner-bun.ts`).
+  //
+  //   bun run build:client                      # dist/client
+  //   wrangler dev -c hosted/wrangler.jsonc     # local workerd
+  //
+  // Secrets: KANNA_RUNNER_URL, KANNA_RUNNER_TOKEN, KANNA_PASSWORD
+  // (`wrangler secret put`, or hosted/.dev.vars for `wrangler dev`).
+  "name": "kanna-hosted",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // The Claude Agent SDK builds a `require` from import.meta.url as it loads;
+  // a Worker bundle has none.
+  "define": { "import.meta.url": "\"file:///bundle/worker.js\"" },
+  "alias": {
+    // An optional peer of Mistral's SDK (through Pi) that Kanna doesn't install.
+    "@opentelemetry/api": "./stubs/opentelemetry-api.ts",
+    // The Claude SDK reads the CLI's output through readline, which workerd
+    // doesn't implement (see the stub).
+    "readline": "./stubs/readline.ts"
+  },
+  "assets": {
+    "directory": "../dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/ws", "/health", "/auth/*", "/api/*", "/__cloud/*"]
+  },
+  "durable_objects": { "bindings": [{ "name": "KANNA", "class_name": "KannaHost" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KannaHost"] }]
+}

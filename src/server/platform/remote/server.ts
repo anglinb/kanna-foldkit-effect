@@ -4,7 +4,7 @@ import { Machine } from "../machine"
 import { CommandSpawnError, ProcessSpawner, type ProcessSignal, type ProcessStdin, type SpawnedProcess } from "../process-spawner"
 import { PtySpawner, type PtyProcess } from "../pty"
 import { definedEnv, toWireExit, toWireFileInfo, toWirePlatformError, wireFs } from "./codec"
-import { MachineRpcs, type ProcessEvent, type PtyEvent, type WireStdin } from "./protocol"
+import { MachineRpcs, type ProcessEvent, type PtyEvent, type WireStdin, WireWatchEvent } from "./protocol"
 
 /**
  * The runner's half of `MachineRpcs`: each call answered with this
@@ -81,10 +81,16 @@ export const MachineRpcHandlers = MachineRpcs.toLayer(Effect.gen(function* () {
       ...(bytesToRead !== undefined ? { bytesToRead: BigInt(bytesToRead) } : {}),
       ...(chunkSize !== undefined ? { chunkSize } : {}),
     }).pipe(Stream.mapError(toWirePlatformError)),
-    FsWatch: ({ path, recursive }) => fs.watch(path, { recursive }).pipe(
-      Stream.map((event) => ({ _tag: event._tag, path: event.path })),
-      Stream.mapError(toWirePlatformError),
-    ),
+    FsWatch: ({ path, recursive }) => Stream.unwrap(Effect.gen(function* () {
+      // The host's `onReady` fires when this `Ready` arrives: after the
+      // runner's own watcher is installed, not just when the call went out.
+      const ready = yield* Queue.unbounded<typeof WireWatchEvent.Type, Cause.Done>()
+      const changes = fs.watch(path, { recursive, onReady: () => Queue.offerUnsafe(ready, { _tag: "Ready", path }) }).pipe(
+        Stream.map((event): typeof WireWatchEvent.Type => ({ _tag: event._tag, path: event.path })),
+        Stream.mapError(toWirePlatformError),
+      )
+      return Stream.merge(Stream.fromQueue(ready), changes, { haltStrategy: "right" })
+    })),
     FsOpen: ({ path, ...options }) => Stream.unwrap(wireFs(Effect.gen(function* () {
       const opened = yield* fs.open(path, options)
       const handle = yield* register(files, opened)

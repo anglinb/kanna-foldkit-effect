@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { BunHttpServer } from "@effect/platform-bun"
-import { Effect, FileSystem, Layer, Option, type Scope, Stream } from "effect"
+import { Effect, Fiber, FileSystem, Layer, Option, type Scope, Stream } from "effect"
 import { HttpServer } from "effect/http"
 import { BunPlatform } from "../bun"
 import { FileSystemExtras } from "../file-system-extras"
@@ -114,6 +114,17 @@ describe("remote machine", () => {
     expect(yield* collect(fs.stream(file, { offset: 1 }))).toBe("ello")
     const body = yield* extras.fileBody(file)
     expect(yield* Effect.promise(() => new Response(body).text())).toBe("hello")
+  })))
+
+  test("watches a directory, reporting ready once the runner's watcher is installed", () => run(Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "kanna-remote-" })
+    let ready = false
+    const first = yield* fs.watch(dir, { onReady: () => (ready = true) }).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild)
+    while (!ready) yield* Effect.sleep("10 millis")
+    yield* fs.writeFileString(`${dir}/settings.json`, "{}")
+    const events = [...(yield* Fiber.join(first))]
+    expect(events[0]?.path).toContain("settings.json")
   })))
 
   test("opens a file and reads it by position", () => run(Effect.gen(function* () {

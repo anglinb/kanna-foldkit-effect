@@ -103,7 +103,8 @@ export const FsStream = Rpc.make("FsStream", {
   stream: true,
 })
 
-export const WireWatchEvent = Schema.Struct({ _tag: Schema.Literals(["Create", "Update", "Remove"]), path: Schema.String })
+/** A change, or `Ready` (first, once the runner's watcher is installed: `WatchOptions.onReady`). */
+export const WireWatchEvent = Schema.Struct({ _tag: Schema.Literals(["Ready", "Create", "Update", "Remove"]), path: Schema.String })
 export const FsWatch = Rpc.make("FsWatch", {
   payload: { path: Schema.String, recursive: Schema.optional(Schema.Boolean) },
   success: WireWatchEvent,

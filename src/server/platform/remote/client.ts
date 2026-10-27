@@ -278,6 +278,11 @@ export const makeRemoteMachineLayer = (client: MachineClient): Layer.Layer<Remot
       })),
       watch: (path, options) => client.FsWatch({ path, ...(options?.recursive !== undefined ? { recursive: options.recursive } : {}) }).pipe(
         Stream.mapError(platformErrorOf),
+        Stream.filter((event): event is FileSystem.WatchEvent => {
+          if (event._tag !== "Ready") return true
+          options?.onReady?.()
+          return false
+        }),
       ),
       writeFile: (path, data, options) => unwireFs(client.FsWriteFile({ path, data, ...options })),
     })
