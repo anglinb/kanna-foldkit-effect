@@ -132,10 +132,23 @@ export interface AuthManagerOptions {
    * proxy such as cloudflared.
    */
   trustProxy?: boolean
+  /** Default: in memory. */
+  sessions?: AuthSessionStore
+}
+
+/**
+ * Where signed-in session tokens are kept. Memory by default, so a restart
+ * signs everyone out; a host that restarts as a matter of course (a Durable
+ * Object waking from sleep) keeps them in its storage instead.
+ */
+export interface AuthSessionStore {
+  has(token: string): boolean
+  add(token: string): void
+  delete(token: string): void
 }
 
 export function createAuthManager(password: string, options: AuthManagerOptions = {}): AuthManager {
-  const sessions = new Set<string>()
+  const sessions: AuthSessionStore = options.sessions ?? new Set<string>()
   const expectedPassword = Buffer.from(password)
   const trustProxy = options.trustProxy ?? false
 

@@ -7,9 +7,9 @@ import type { RunnerEndpoint } from "../remote/connection"
 import { RemoteMachinePlatform } from "../remote/host-platform"
 import { makeSqliteFileSystem, type SqlRunner } from "../sqlite-file-system"
 import { DurableObjectHostProcessLayer } from "./host-process"
-import { makeDurableObjectHttpHost } from "./http-host"
+import { makeDurableObjectHttpHost, type HibernationContext } from "./http-host"
 
-export { PRIMARY_PORT } from "./http-host"
+export { PRIMARY_PORT, type HibernationContext, type WorkersWebSocket } from "./http-host"
 
 /**
  * Kanna's own files in the object: a fixed path that is never the machine's,
@@ -27,11 +27,13 @@ export const DURABLE_OBJECT_ROOT = "/kanna"
  */
 export function makeDurableObjectPlatform(options: {
   readonly sql: SqlRunner
+  /** The object's state, for its hibernatable browser sockets. */
+  readonly hibernation: HibernationContext
   readonly runner: RunnerEndpoint
   /** The runner's home before it has ever connected: the container image's. */
   readonly defaultHome?: string
 }) {
-  const http = makeDurableObjectHttpHost()
+  const http = makeDurableObjectHttpHost({ hibernation: options.hibernation, sql: options.sql })
   const facts = machineFactsStore(options.sql)
   const home = options.defaultHome ?? "/home/kanna"
   const stored = Layer.effectContext(Effect.map(makeSqliteFileSystem(options.sql), ({ fs, extras }) =>

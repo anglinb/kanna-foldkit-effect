@@ -8,6 +8,7 @@ import type {
   TerminalSnapshot,
 } from "../../shared/protocol"
 import { LOG_PREFIX } from "../../shared/branding"
+import { TEXT_PING, TEXT_PONG } from "../../shared/protocol"
 import { generateUUID } from "../lib/utils"
 
 type SnapshotListener<T> = (value: T) => void
@@ -57,6 +58,9 @@ export class KannaSocket {
   private lastOpenAt = 0
   private lastMessageAt = 0
   private reconnectImmediatelyOnClose = false
+  /** Until this connection's server shows it can't (see TEXT_PING). */
+  private textPingSupported = true
+  private pongWaiter: { readonly resolve: () => void; readonly reject: (error: Error) => void; readonly fallBack: () => void } | null = null
   private readonly handleWindowFocus = () => {
     void this.ensureHealthyConnection()
   }
@@ -224,6 +228,7 @@ export class KannaSocket {
       this.reconnectImmediatelyOnClose = false
       this.lastOpenAt = Date.now()
       this.lastMessageAt = this.lastOpenAt
+      this.textPingSupported = true
       this.emitStatus("connected")
       this.startHeartbeat()
       for (const [id, subscription] of this.subscriptions.entries()) {
@@ -242,6 +247,11 @@ export class KannaSocket {
 
     this.ws.addEventListener("message", (event) => {
       this.lastMessageAt = Date.now()
+      if (event.data === TEXT_PONG) {
+        this.pongWaiter?.resolve()
+        this.pongWaiter = null
+        return
+      }
       let payload: ServerEnvelope
       try {
         const started = performance.now()
@@ -275,6 +285,13 @@ export class KannaSocket {
       }
 
       if (payload.type === "error") {
+        if (!payload.id && this.pongWaiter && payload.message === "Invalid JSON") {
+          // A server from before TEXT_PING: ping it the old way from now on.
+          this.textPingSupported = false
+          this.pongWaiter.fallBack()
+          this.pongWaiter = null
+          return
+        }
         if (!payload.id) {
           console.error(LOG_PREFIX, payload.message)
           return
@@ -298,6 +315,8 @@ export class KannaSocket {
       for (const pending of this.pending.values()) {
         pending.reject(new Error("Disconnected"))
       }
+      this.pongWaiter?.reject(new Error("Disconnected"))
+      this.pongWaiter = null
       this.pending.clear()
       if (reconnectImmediately) {
         this.connect()
@@ -342,7 +361,19 @@ export class KannaSocket {
       return this.pingPromise
     }
 
-    const pingPromise = this.command({ type: "system.ping" })
+    // A text ping when the server takes one: a sleeping hosted server answers
+    // it without waking (see TEXT_PING).
+    const ping = this.textPingSupported && this.ws?.readyState === WebSocket.OPEN
+      ? new Promise<void>((resolve, reject) => {
+        this.pongWaiter = {
+          resolve,
+          reject,
+          fallBack: () => this.command({ type: "system.ping" }).then(() => resolve(), reject),
+        }
+        this.ws!.send(TEXT_PING)
+      })
+      : this.command({ type: "system.ping" })
+    const pingPromise = ping
       .then(() => {
         this.clearPingState()
       })

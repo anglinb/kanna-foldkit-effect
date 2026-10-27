@@ -3,6 +3,7 @@ import { Effect, Layer } from "effect"
 import { KannaLoggerLayer } from "./effect/logger"
 import { BunPlatform } from "./platform/bun"
 import { serveRunner } from "./platform/remote/runner"
+import { inheritShellPath } from "./process-utils"
 
 /**
  * `kanna-runner`: the machine half of a hosted Kanna. Run it where the repos
@@ -23,7 +24,10 @@ if (!token) {
 const port = Number(argValue("--port") ?? process.env.PORT ?? 7420)
 const hostname = argValue("--host") ?? "127.0.0.1"
 
-const program = serveRunner({ token }).pipe(
+// Once, before serving: what a host reads as the machine's PATH, and what
+// every process it starts here inherits, is the login shell's.
+const program = inheritShellPath().pipe(
+  Effect.andThen(serveRunner({ token })),
   Effect.andThen(Effect.log(`[kanna-runner] serving ${hostname}:${port}`)),
   Effect.andThen(Effect.never),
 )

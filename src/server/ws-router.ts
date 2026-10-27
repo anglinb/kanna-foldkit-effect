@@ -4,6 +4,7 @@ import type { PerformanceLog } from "./performance-log"
 import { Cause, Context, Deferred, Effect, Exit, Fiber, Result, Schema, Scope, Stream } from "effect"
 import { PROTOCOL_VERSION } from "../shared/types"
 import type { ClientCommand, ClientEnvelope, ServerEnvelope, SubscriptionTopic } from "../shared/protocol"
+import { TEXT_PING, TEXT_PONG } from "../shared/protocol"
 import { ClientFrameJsonSchema, CompatibleClientEnvelopeSchema } from "../shared/protocol-schema"
 import { diffSidebarIndex, indexSidebarData, type SidebarIndex } from "../shared/sidebar-patch"
 import type { AgentCoordinator } from "./agent"
@@ -2375,6 +2376,10 @@ export function createWsRouter({
   const handleMessageEffect = Effect.fn("WsRouter.handleMessage")(function* (
     ws: ClientSocket<ClientState>, raw: string | Buffer | ArrayBuffer | Uint8Array,
   ) {
+    if (raw === TEXT_PING) {
+      ws.send(TEXT_PONG)
+      return
+    }
     const json = yield* Effect.result(decodeFrameJson(String(raw)))
     if (Result.isFailure(json)) {
       send(ws, { v: PROTOCOL_VERSION, type: "error", message: "Invalid JSON" })
@@ -2455,6 +2460,8 @@ export function createWsRouter({
       sidebarInputsVersion += 1
       return broadcastFilteredSnapshots({ includeSidebar: true })
     },
+    /** Discovery finished after boot (a hosted server discovers in the background). */
+    broadcastLocalProjects: () => broadcastFilteredSnapshots({ includeLocalProjects: true }),
     scheduleBroadcast,
     scheduleChatStateBroadcast,
     broadcastChatChange,

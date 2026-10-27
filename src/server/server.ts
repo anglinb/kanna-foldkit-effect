@@ -8,7 +8,7 @@ import type { AgentProvider, EditorPreset, TerminalPreset } from "../shared/type
 import type { ShareMode } from "../shared/share"
 import { SERVER_CAPABILITIES_PATH, capabilitiesForCloud } from "../shared/server-capabilities"
 import { readRuntimePolicy } from "./runtime-policy"
-import { createAuthManager } from "./auth"
+import { type AuthSessionStore, createAuthManager } from "./auth"
 import type { CloudRuntime } from "./cloud"
 import { CloudFeature, isCloudPath } from "./cloud/feature"
 import { cloudFeatureLayer } from "./cloud/layer"
@@ -152,6 +152,20 @@ export interface StartKannaServerOptions {
    * dir isn't (a Durable Object) puts them elsewhere.
    */
   accountsDir?: string
+  /**
+   * Adds the login shell's PATH to the machine's environment at startup
+   * (default true). A runner does that once when it starts, so a host that
+   * restarts often (a Durable Object waking) skips the shell round trip.
+   */
+  inheritShellPath?: boolean
+  /**
+   * Serve before the first project discovery finishes, and push the
+   * local-projects list when it does. For a host whose machine is a round
+   * trip away, where discovery is slow.
+   */
+  discoverInBackground?: boolean
+  /** Where password sessions live (default: memory). A host that restarts often keeps them in storage. */
+  authSessions?: AuthSessionStore
   /** Harnesses this host can't run, left out of every picker (the hosted build has no Pi). */
   disabledProviders?: ReadonlyArray<AgentProvider>
 }
@@ -160,7 +174,7 @@ type AgentStartupPort = CoordinatorLike & Pick<AgentCoordinator,
   "fetchClaudeUsage" | "fetchCodexRateLimits" | "refreshCursorModelCatalog" | "refreshGrokModelCatalog" | "refreshCodexModelCatalog"
 >
 type RouterStartupPort = Pick<ReturnType<typeof createWsRouter>,
-  "broadcastChatChange" | "broadcastSidebar" | "broadcastChatStateImmediately" | "scheduleChatStateBroadcast" | "scheduleBroadcast"
+  "broadcastChatChange" | "broadcastSidebar" | "broadcastChatStateImmediately" | "scheduleChatStateBroadcast" | "scheduleBroadcast" | "broadcastLocalProjects"
 >
 type StoreStartupPort = Pick<EventStore["Service"], "state" | "recordFilesTouched">
 type UsageLimitsStartupPort = Pick<UsageLimits["Service"], "refresh">
@@ -202,8 +216,10 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
   const runtimeProfile = getRuntimeProfile()
   // Runs alongside the store setup below (~0.5 s for a zsh with nvm) and is
   // awaited before anything can start an agent.
-  const shellPathReady = yield* Effect.forkChild(inheritShellPath())
-  const auth = options.password ? createAuthManager(options.password, { trustProxy: options.trustProxy ?? false }) : null
+  const shellPathReady = yield* Effect.forkChild(options.inheritShellPath === false ? Effect.void : inheritShellPath())
+  const auth = options.password
+    ? createAuthManager(options.password, { trustProxy: options.trustProxy ?? false, ...(options.authSessions ? { sessions: options.authSessions } : {}) })
+    : null
   const dataDir = options.dataDir ?? getDataDir(machine.homeDirectory)
   // Services already on Effect, built once and released at shutdown. The
   // rest of startup still holds them as plain values until it migrates too.
@@ -413,7 +429,23 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
   const disposeProjectIconChanges = subscribeKanna(projectIcons.changes, () => {
     void routerSlot.get().broadcastSidebar()
   })
-  yield* refreshDiscoveryEffect()
+  if (options.discoverInBackground) {
+    // Hosted, discovery reads the CLIs' histories on the runner one file at a
+    // time, thousands of round trips; serving shouldn't wait for it.
+    yield* refreshDiscoveryEffect().pipe(
+      Effect.andThen(Effect.sync(() => {
+        try {
+          void routerSlot.get().broadcastLocalProjects()
+        } catch {
+          // Not serving yet: whoever subscribes reads the list as it is now.
+        }
+      })),
+      Effect.catchCause((cause) => Effect.logWarning("project discovery failed", cause)),
+      Effect.forkDetach,
+    )
+  } else {
+    yield* refreshDiscoveryEffect()
+  }
   const agent = new AgentCoordinator({
     platform,
     managedMcp,
@@ -851,5 +883,20 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
     /** For the single-instance lock's status (instance-socket.ts), which the
      *  Mac app's quit dialog shows. */
     state: () => ({ runningChats: agent.activeTurns.size, cloud: cloudFeature.connected(), cloudEnabled }),
+    /**
+     * What sleeping would cut off, for a host that can sleep (a Durable
+     * Object parks only when it isn't busy): a turn, a chat waiting on its
+     * sub-chats, a running terminal. And when the next schedule is due, to
+     * wake for it.
+     */
+    activity: () => runKanna(Effect.gen(function* () {
+      const counts = yield* terminals.resourceCounts
+      let nextScheduledAt: number | null = null
+      for (const schedule of store.listSchedules()) {
+        if (!schedule.enabled || schedule.nextRunAt == null) continue
+        if (nextScheduledAt === null || schedule.nextRunAt < nextScheduledAt) nextScheduledAt = schedule.nextRunAt
+      }
+      return { busy: agent.getChatStatuses().size > 0 || counts.runningTerminals > 0, nextScheduledAt }
+    })),
   }
 })

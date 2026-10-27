@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { TEXT_PING, TEXT_PONG } from "../../shared/protocol"
 import { KannaSocket } from "./socket"
 
 type EventHandler = (event?: unknown) => void
@@ -88,7 +89,8 @@ class FakeWebSocket {
   }
 
   send(message: string) {
-    this.sent.push(JSON.parse(message))
+    // Text heartbeat frames aren't JSON.
+    this.sent.push(message.startsWith("{") ? JSON.parse(message) : { text: message })
   }
 
   open() {
@@ -98,6 +100,10 @@ class FakeWebSocket {
 
   receive(message: Record<string, unknown>) {
     this.emit("message", { data: JSON.stringify(message) })
+  }
+
+  receiveText(text: string) {
+    this.emit("message", { data: text })
   }
 
   close() {
@@ -166,16 +172,38 @@ describe("KannaSocket", () => {
     ;(socket as any).lastMessageAt = Date.now() - 30_000
 
     const healthCheck = socket.ensureHealthyConnection()
-    const ping = ws.sent[0]
+    expect(ws.sent[0]).toEqual({ text: TEXT_PING })
 
-    expect(ping?.type).toBe("command")
-    expect(ping?.command).toEqual({ type: "system.ping" })
-
-    ws.receive({ v: 1, type: "ack", id: ping?.id })
+    ws.receiveText(TEXT_PONG)
     await healthCheck
 
     expect(FakeWebSocket.instances).toHaveLength(1)
     socket.dispose()
+  })
+
+  test("pings a server too old for text pings with system.ping instead", async () => {
+    const socket = new KannaSocket("ws://localhost/ws")
+    socket.start()
+    const ws = FakeWebSocket.instances[0]!
+    ws.open()
+    ;(socket as any).lastOpenAt = Date.now() - 30_000
+    ;(socket as any).lastMessageAt = Date.now() - 30_000
+
+    const healthCheck = socket.ensureHealthyConnection()
+    expect(ws.sent[0]).toEqual({ text: TEXT_PING })
+    // What such a server says to a frame that isn't JSON.
+    ws.receive({ v: 1, type: "error", message: "Invalid JSON" })
+    const ping = ws.sent[1]
+    expect(ping?.command).toEqual({ type: "system.ping" })
+    ws.receive({ v: 1, type: "ack", id: ping?.id })
+    await healthCheck
+
+    // And keeps to it on that connection.
+    ;(socket as any).lastMessageAt = Date.now() - 30_000
+    const second = socket.ensureHealthyConnection().catch(() => {})
+    expect(ws.sent[2]?.command).toEqual({ type: "system.ping" })
+    socket.dispose()
+    await second
   })
 
   test("reconnects immediately when a stale ping times out", async () => {
@@ -204,8 +232,8 @@ describe("KannaSocket", () => {
     ;(socket as any).lastOpenAt = Date.now() - 30_000
     ;(socket as any).lastMessageAt = Date.now() - 30_000
     windowTarget.dispatchEvent("focus")
-    let ping = ws.sent.pop()
-    ws.receive({ v: 1, type: "ack", id: ping?.id })
+    expect(ws.sent.pop()).toEqual({ text: TEXT_PING })
+    ws.receiveText(TEXT_PONG)
     await Promise.resolve()
 
     documentTarget.visibilityState = "hidden"
@@ -214,17 +242,15 @@ describe("KannaSocket", () => {
     ;(socket as any).lastMessageAt = Date.now() - 30_000
     documentTarget.visibilityState = "visible"
     documentTarget.dispatchEvent("visibilitychange")
-    ping = ws.sent.pop()
-    ws.receive({ v: 1, type: "ack", id: ping?.id })
+    expect(ws.sent.pop()).toEqual({ text: TEXT_PING })
+    ws.receiveText(TEXT_PONG)
     await Promise.resolve()
 
     ;(socket as any).lastOpenAt = Date.now() - 30_000
     ;(socket as any).lastMessageAt = Date.now() - 30_000
     windowTarget.dispatchEvent("online")
-    ping = ws.sent.pop()
-
-    expect(ping?.command).toEqual({ type: "system.ping" })
-    ws.receive({ v: 1, type: "ack", id: ping?.id })
+    expect(ws.sent.pop()).toEqual({ text: TEXT_PING })
+    ws.receiveText(TEXT_PONG)
     await Promise.resolve()
     socket.dispose()
   })
@@ -256,8 +282,8 @@ describe("KannaSocket", () => {
 
     timers.runInterval((socket as any).heartbeatTimer)
 
-    expect(ws.sent[0]?.command).toEqual({ type: "system.ping" })
-    ws.receive({ v: 1, type: "ack", id: ws.sent[0]?.id })
+    expect(ws.sent[0]).toEqual({ text: TEXT_PING })
+    ws.receiveText(TEXT_PONG)
     await Promise.resolve()
     socket.dispose()
   })

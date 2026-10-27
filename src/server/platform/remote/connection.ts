@@ -36,6 +36,13 @@ export function runnerSocketUrl(endpoint: RunnerEndpoint) {
 const HEARTBEAT = Duration.seconds(15)
 const HEARTBEAT_TIMEOUT = Duration.seconds(10)
 const RECONNECT = Schedule.spaced(Duration.seconds(3))
+/** How long a call waits on a connection attempt already under way (a host that just woke). */
+const CONNECT_WAIT = Duration.seconds(5)
+
+const isStreamRpc = (tag: string) => {
+  const rpc = MachineRpcs.requests.get(tag)
+  return rpc !== undefined && RpcSchema.isStreamSchema(rpc.successSchema)
+}
 
 /**
  * Stands in for the client while there is no connection: every call fails
@@ -43,8 +50,7 @@ const RECONNECT = Schedule.spaced(Duration.seconds(3))
  */
 const offlineClient: MachineClient = new Proxy({} as MachineClient, {
   get: (_target, tag) => {
-    const rpc = MachineRpcs.requests.get(String(tag))
-    const isStream = rpc !== undefined && RpcSchema.isStreamSchema(rpc.successSchema)
+    const isStream = isStreamRpc(String(tag))
     return (_payload: unknown, options?: { readonly asQueue?: boolean }) => {
       const error = new MachineOfflineError(String(tag))
       if (isStream && !options?.asQueue) return Stream.fail(error)
@@ -67,6 +73,8 @@ export const RemoteMachineLayer = (options: RemoteMachineOptions): Layer.Layer<R
     let current: MachineClient = offlineClient
     let facts: MachineFacts | null = options.lastKnown ?? null
     const firstConnected = yield* Deferred.make<void>()
+    /** Set while an attempt to connect is under way; done when it connects or fails. */
+    let attempt: Deferred.Deferred<void> | null = null
 
     // The host's copy of the environment, and what the host changed in it:
     // a runner that restarts comes back with its own, and the changes (the
@@ -91,6 +99,12 @@ export const RemoteMachineLayer = (options: RemoteMachineOptions): Layer.Layer<R
     }
 
     const session = Effect.gen(function* () {
+      const thisAttempt = Deferred.makeUnsafe<void>()
+      attempt = thisAttempt
+      yield* Effect.addFinalizer(() => Effect.sync(() => {
+        Deferred.doneUnsafe(thisAttempt, Effect.void)
+        if (attempt === thisAttempt) attempt = null
+      }))
       const client = yield* RpcClient.make(MachineRpcs)
       const info = yield* client.MachineInfo().pipe(Effect.timeout(HEARTBEAT_TIMEOUT))
       const ptyAvailable = yield* client.PtyAvailable().pipe(Effect.timeout(HEARTBEAT_TIMEOUT))
@@ -102,6 +116,7 @@ export const RemoteMachineLayer = (options: RemoteMachineOptions): Layer.Layer<R
         yield* (value === undefined ? client.MachineSetEnv({ name }) : client.MachineSetEnv({ name, value }))
       }
       current = client
+      Deferred.doneUnsafe(thisAttempt, Effect.void)
       options.onFacts?.(facts)
       yield* Deferred.succeed(firstConnected, undefined)
       yield* Effect.logInfo(`connected to the machine at ${new URL(options.runner.url).host}`)
@@ -132,8 +147,21 @@ export const RemoteMachineLayer = (options: RemoteMachineOptions): Layer.Layer<R
     )
 
     if (facts === null) yield* Deferred.await(firstConnected)
+    // Calls go to the current connection. With none, a call waits briefly for
+    // an attempt already under way (a host that just woke is connecting) and
+    // otherwise fails at once.
+    const client = new Proxy({} as MachineClient, {
+      get: (_target, tag) => (payload: unknown, callOptions?: { readonly asQueue?: boolean }) => {
+        const call = () => (current as any)[tag](payload, callOptions)
+        const pending = attempt
+        if (current !== offlineClient || pending === null) return call()
+        const wait = Deferred.await(pending).pipe(Effect.timeout(CONNECT_WAIT), Effect.ignore)
+        if (isStreamRpc(String(tag)) && !callOptions?.asQueue) return Stream.unwrap(Effect.map(wait, call))
+        return Effect.andThen(wait, Effect.suspend(call))
+      },
+    })
     const link: RunnerLink = {
-      client: new Proxy({} as MachineClient, { get: (_target, tag) => (current as any)[tag] }),
+      client,
       facts: () => facts!,
       env: machineEnv,
     }

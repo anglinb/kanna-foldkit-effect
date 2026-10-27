@@ -396,6 +396,16 @@ export type ClientCommand =
 
 export type OpenExternalAction = Extract<ClientCommand, { type: "system.openExternal" }>["action"]
 
+/**
+ * A heartbeat outside the JSON protocol, as fixed text frames, so a host can
+ * answer it without running any code (a sleeping Durable Object's
+ * auto-response). The server answers `TEXT_PING` with `TEXT_PONG` and never
+ * sends either unasked. A server too old for it answers with its id-less
+ * "Invalid JSON" error, and the client goes back to `system.ping`.
+ */
+export const TEXT_PING = "kanna:ping"
+export const TEXT_PONG = "kanna:pong"
+
 export type ClientEnvelope =
   | { v: 1; type: "subscribe"; id: string; topic: SubscriptionTopic }
   | { v: 1; type: "unsubscribe"; id: string }
