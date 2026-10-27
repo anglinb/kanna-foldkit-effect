@@ -1,7 +1,10 @@
 # Runtime portability — running Kanna's server off Bun
 
-Status: phases 1–3 and most of 5 done (branch `portable-platform`); the rest
-proposed. Written 2026-10-22, against `effect-migration` at 4972a9a.
+Status: phases 1–3, 6 and a first cut of 8 done, with phase 4's interim
+routing (branch `hosted-runtime`): Kanna's server runs in a Durable Object
+in local workerd, its state in the object's SQLite, with the machine at a
+runner. See "Running it" and "Gaps" at the end. Written 2026-10-22, against
+`effect-migration` at 4972a9a; updated 2026-10-27.
 
 Goal: most of the server (router, event store, orchestrator, provider
 adapters, git logic, terminals' multiplexing) runs unchanged in a pure-JS
@@ -247,23 +250,30 @@ ever hosted: they make every IO edge fakeable in tests.
   coordinator and Kanna tools take the platform from their caller. Not
   done: one `(Request) => Effect<Response>` handler a DO's `fetch` can
   call without `listen`; splitting Claude's `query()` options (§5).
-- [ ] **6. Runner + RPC.** `kanna runner`: a small Bun entry that serves
-  `FileSystem`, `ChildProcessSpawner`, `PtySpawner`, `MachineInfo` as an
-  `effect/rpc` group over one WebSocket (streams for stdio and PTY output).
-  A `RemoteMachine` layer implements the same services as an RPC client.
-  **Prove it locally first**: run Kanna on Bun with `RemoteMachine` pointed
-  at a runner on the same laptop. Every test of the machine modules can run
-  against both layers.
-- [ ] **7. Spikes, in parallel with 4–6.** (a) Claude via
-  `spawnClaudeCodeProcess` vs. browser SDK in workerd. (b) Pi in a process
-  or in the runner. (c) Bundle the portable layer set for workerd with
-  `nodejs_compat` and see what fails to load (`node:path` and `node:crypto`
-  are supported; `node:fs` is a virtual per-request FS; `child_process` is a
-  stub).
-- [ ] **8. DO host.** SQLite store layers, DO WebSocket `ClientSocket`,
-  `fetch` entry, alarms for schedules and background tasks, runner
-  connection management. This is the first phase that writes
-  Cloudflare-specific code.
+- [x] **6. Runner + RPC.** `MachineRpcs` (`platform/remote/protocol.ts`) is
+  one `effect/rpc` group for files, `FileSystemExtras`, processes, PTYs and
+  the machine's facts. The runner (`runner-bun.ts`) answers it with the Bun
+  bindings; `RemoteMachineLayer` turns a WebSocket to it back into the same
+  services. The host dials the runner (Cloudflare Containers' direction; a
+  laptop runner needs a tunnel). Processes, PTYs and open files live as long
+  as their RPC stream, so closing the host's scope or losing the connection
+  kills them on the runner. `PlatformError` keeps its reason tag across the
+  wire. Proven locally: `KANNA_RUNNER_URL` makes the Bun server use a runner
+  (`server-bun.ts`), and Claude, Codex, git and terminals all run as the
+  runner's children.
+- [x] **7. Spikes.** (a) Claude: `spawnClaudeCodeProcess` over the
+  machine's `ProcessSpawner` (`claude-process.ts`), used when
+  `Machine.remote`; local Kanna keeps the SDK's own spawn. Works in workerd
+  once bare `readline` is aliased (workerd's never yields lines). (b) Pi:
+  not done; it loads lazily and is unusable hosted (see Gaps). (c) The whole
+  server bundles for workerd (19 MB, 3.5 MB gzip) with `nodejs_compat`, a
+  defined `import.meta.url`, an `@opentelemetry/api` stub, and the server
+  imported inside the object's handler.
+- [~] **8. DO host.** Done: `hosted/worker.ts` (assets + routing to one
+  object), `platform/cloudflare` (`HttpHost` over the object's `fetch` with
+  `WebSocketPair`, a `HostProcess` stand-in), `sqlite-file-system.ts` for
+  the data dir, `server-durable-object.ts` as the composition root, password
+  auth required. Not done: hibernation, alarms, reconnect policy (see Gaps).
 
 ## 8. Things to decide
 
@@ -279,3 +289,56 @@ ever hosted: they make every IO edge fakeable in tests.
 4. **Topology E** (hosted history, user's own laptop as the runner) falls
    out of phase 6 for free: the runner is the same program wherever it runs.
    That may be a better first hosted product than a managed container.
+
+## Running it
+
+Locally, all on one laptop:
+
+```sh
+# 1. The machine
+KANNA_RUNNER_TOKEN=secret bun run runner -- --port 17420
+
+# 2a. The server on Bun, with the runner as its machine
+KANNA_RUNNER_URL=ws://127.0.0.1:17420 KANNA_RUNNER_TOKEN=secret \
+  KANNA_DATA_ROOT_NAME=.kanna-hosted-dev bun run dev --port 5184
+
+# 2b. Or the server in a Durable Object (local workerd)
+bun run build:client
+printf 'KANNA_RUNNER_URL=ws://127.0.0.1:17420\nKANNA_RUNNER_TOKEN=secret\nKANNA_PASSWORD=pw\n' > hosted/.dev.vars
+bun run hosted:dev          # http://127.0.0.1:18787
+```
+
+Deploying is `wrangler deploy -c hosted/wrangler.jsonc` with the three
+secrets set, and a runner the object can reach over `wss://`: a container
+next to it, or `cloudflared` in front of a laptop's runner.
+
+## Gaps
+
+In rough order of what breaks first:
+
+1. **Kanna MCP for Codex and Cursor.** They reach Kanna's tools at
+   `http://127.0.0.1:<port>/mcp` (`kanna-mcp.ts`). Hosted, that port is a
+   virtual one inside the object, and the CLIs run on the runner. Needs the
+   runner to listen locally and forward to the host's
+   `DurableObjectHttpHost.serve(request, port)`: a second, host-served RPC
+   group over the same socket, or HTTP over the existing one. Claude is
+   unaffected (its Kanna tools are in-process SDK MCP servers).
+2. **Pi** runs in-process and executes its own tools, so hosted it would
+   run them inside the object. Hide it in the hosted build, or move the Pi
+   adapter into the runner and stream `HarnessEvent`s.
+3. **The object's lifetime.** No WebSocket hibernation: the object stays in
+   memory while a browser is connected. If it is evicted, in-flight turns
+   are lost without the `resumePending` marker (eviction doesn't run
+   shutdown), the runner kills their processes when the connection drops,
+   and login sessions (in memory) need a new login. Alarms should replace
+   timers for schedules.
+4. **Runner connection.** Startup fails if the runner is down (the next
+   request retries). After startup the socket reconnects, but calls in
+   flight fail and running processes die with the old connection.
+5. **Cold start.** About 8.5 s in local workerd, before the first request is
+   answered.
+6. **Tenancy.** One object (`idFromName("default")`), one runner, one
+   token, one password.
+7. **Phase 4 proper.** Kanna's state is still files, in SQLite. Domain
+   stores (`EventLog`, `TranscriptStore`, media in R2) are the real shape;
+   `RoutedFileSystem` keeps everything working until then.

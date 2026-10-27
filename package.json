@@ -43,6 +43,8 @@
     "dev:cloud": "KANNA_DEVBOX_UI=1 bun run ./scripts/dev.ts",
     "dev:client": "vite --host 0.0.0.0 --port 5174",
     "dev:server": "bun run ./scripts/dev-server.ts --no-open --port 5175",
+    "runner": "bun run ./src/server/runner-bun.ts",
+    "hosted:dev": "wrangler dev -c hosted/wrangler.jsonc --port 18787 --ip 127.0.0.1",
     "install:dev": "bun install && bun run build && bun install -g .",
     "start": "bun run ./src/server/cli.ts",
     "test": "bun test",
