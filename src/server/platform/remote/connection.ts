@@ -1,16 +1,27 @@
-import { Deferred, Duration, Effect, Layer, Schedule, Stream } from "effect"
+import { type Context, Deferred, Duration, Effect, Layer, Schedule, Stream } from "effect"
 import { RpcClient, RpcSchema, RpcSerialization } from "effect/rpc"
 import { Socket } from "effect/socket"
 import type { MachineEnv } from "../machine"
 import { MachineOfflineError, makeRemoteMachineContext, type MachineClient, type MachineFacts, type RemoteMachineServices, type RunnerLink } from "./client"
 import { MachineRpcs, RUNNER_RPC_PATH, RUNNER_TOKEN_PARAM } from "./protocol"
 
-export interface RunnerEndpoint {
-  /** The runner's base URL, `ws://` or `wss://` (an `http(s)://` one is rewritten). */
-  readonly url: string
-  /** The runner's shared secret. */
-  readonly token: string
-}
+export type RunnerEndpoint =
+  | {
+    /** The runner's base URL, `ws://` or `wss://` (an `http(s)://` one is rewritten). */
+    readonly url: string
+    /** The runner's shared secret. */
+    readonly token: string
+  }
+  | {
+    /**
+     * Opens an already-accepted WebSocket to the runner's RPC endpoint: how a
+     * host that reaches it through a binding, not a URL, connects (a Durable
+     * Object and its Container).
+     */
+    readonly connect: () => Promise<Socket.WebSocketLike>
+    /** What to call it in logs. */
+    readonly label: string
+  }
 
 export interface RemoteMachineOptions {
   readonly runner: RunnerEndpoint
@@ -22,9 +33,16 @@ export interface RemoteMachineOptions {
   readonly lastKnown?: MachineFacts | null
   /** Called with the facts each time the runner (re)connects, for the host to keep. */
   readonly onFacts?: (facts: MachineFacts) => void
+  /**
+   * Runs on each new connection before anything else may use it, with the
+   * machine as that connection sees it: a host whose machine starts with an
+   * empty disk restores it here. A failure drops the connection, and the
+   * next attempt runs it again.
+   */
+  readonly onConnected?: (machine: Context.Context<RemoteMachineServices>) => Effect.Effect<void, unknown>
 }
 
-export function runnerSocketUrl(endpoint: RunnerEndpoint) {
+export function runnerSocketUrl(endpoint: { readonly url: string; readonly token: string }) {
   const url = new URL(endpoint.url)
   if (url.protocol === "http:") url.protocol = "ws:"
   if (url.protocol === "https:") url.protocol = "wss:"
@@ -42,6 +60,22 @@ const CONNECT_WAIT = Duration.seconds(5)
 const isStreamRpc = (tag: string) => {
   const rpc = MachineRpcs.requests.get(tag)
   return rpc !== undefined && RpcSchema.isStreamSchema(rpc.successSchema)
+}
+
+/** The socket to the runner, by URL or through the host's own `connect`. */
+function socketLayer(endpoint: RunnerEndpoint): Layer.Layer<Socket.Socket> {
+  if ("url" in endpoint) {
+    return Socket.layerWebSocket(runnerSocketUrl(endpoint), { openTimeout: Duration.seconds(10) }).pipe(
+      Layer.provide(Socket.layerWebSocketConstructorGlobal),
+    )
+  }
+  return Layer.effect(Socket.Socket, Socket.fromWebSocket(Effect.acquireRelease(
+    Effect.tryPromise({
+      try: endpoint.connect,
+      catch: (cause) => new Socket.SocketError({ reason: new Socket.SocketOpenError({ kind: "Unknown", cause }) }),
+    }),
+    (ws) => Effect.sync(() => ws.close(1000)),
+  )))
 }
 
 /**
@@ -115,11 +149,14 @@ export const RemoteMachineLayer = (options: RemoteMachineOptions): Layer.Layer<R
         else env[name] = value
         yield* (value === undefined ? client.MachineSetEnv({ name }) : client.MachineSetEnv({ name, value }))
       }
+      if (options.onConnected) {
+        yield* options.onConnected(makeRemoteMachineContext({ client, facts: () => facts!, env: machineEnv }))
+      }
       current = client
       Deferred.doneUnsafe(thisAttempt, Effect.void)
       options.onFacts?.(facts)
       yield* Deferred.succeed(firstConnected, undefined)
-      yield* Effect.logInfo(`connected to the machine at ${new URL(options.runner.url).host}`)
+      yield* Effect.logInfo(`connected to the machine at ${"url" in options.runner ? new URL(options.runner.url).host : options.runner.label}`)
       // Until a heartbeat fails: then the session ends and the loop reconnects.
       yield* client.PtyAvailable().pipe(
         Effect.timeout(HEARTBEAT_TIMEOUT),
@@ -131,11 +168,8 @@ export const RemoteMachineLayer = (options: RemoteMachineOptions): Layer.Layer<R
         current = offlineClient
       })),
       Effect.scoped,
-      Effect.provide(Layer.mergeAll(
-        RpcClient.layerProtocolSocket({ retryTransientErrors: false }),
-      ).pipe(
-        Layer.provide(Socket.layerWebSocket(runnerSocketUrl(options.runner), { openTimeout: Duration.seconds(10) })),
-        Layer.provide(Socket.layerWebSocketConstructorGlobal),
+      Effect.provide(RpcClient.layerProtocolSocket({ retryTransientErrors: false }).pipe(
+        Layer.provide(socketLayer(options.runner)),
         Layer.provide(RpcSerialization.layerJson),
       )),
     )

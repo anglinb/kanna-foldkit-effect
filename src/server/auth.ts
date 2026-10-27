@@ -134,6 +134,47 @@ export interface AuthManagerOptions {
   trustProxy?: boolean
   /** Default: in memory. */
   sessions?: AuthSessionStore
+  /**
+   * Caps wrong passwords: per client (by `CF-Connecting-IP`, the address
+   * Cloudflare saw) and in total, within a sliding window. Off by default; a
+   * server on the public internet behind a password alone turns it on.
+   */
+  loginRateLimit?: LoginRateLimit
+}
+
+export interface LoginRateLimit {
+  readonly windowMs: number
+  readonly maxFailuresPerClient: number
+  readonly maxFailuresTotal: number
+}
+
+/** Failed logins in the last window, per client and in all. */
+function loginLimiter(limit: LoginRateLimit, now: () => number = Date.now) {
+  const failures = new Map<string, Array<number>>()
+  const all: Array<number> = []
+  const recent = (times: Array<number>) => {
+    const cutoff = now() - limit.windowMs
+    while (times.length > 0 && times[0]! <= cutoff) times.shift()
+    return times
+  }
+  return {
+    /** Seconds to wait before trying again, or null if a try is allowed now. */
+    blockedFor(client: string) {
+      const mine = recent(failures.get(client) ?? [])
+      const total = recent(all)
+      const oldest = mine.length >= limit.maxFailuresPerClient ? mine[0] : total.length >= limit.maxFailuresTotal ? total[0] : undefined
+      return oldest === undefined ? null : Math.max(1, Math.ceil((oldest + limit.windowMs - now()) / 1000))
+    },
+    failed(client: string) {
+      const mine = failures.get(client) ?? []
+      mine.push(now())
+      failures.set(client, mine)
+      all.push(now())
+    },
+    succeeded(client: string) {
+      failures.delete(client)
+    },
+  }
 }
 
 /**
@@ -149,6 +190,8 @@ export interface AuthSessionStore {
 
 export function createAuthManager(password: string, options: AuthManagerOptions = {}): AuthManager {
   const sessions: AuthSessionStore = options.sessions ?? new Set<string>()
+  const limiter = options.loginRateLimit ? loginLimiter(options.loginRateLimit) : null
+  const clientOf = (req: Request) => req.headers.get("cf-connecting-ip") ?? "unknown"
   const expectedPassword = Buffer.from(password)
   const trustProxy = options.trustProxy ?? false
 
@@ -208,10 +251,17 @@ export function createAuthManager(password: string, options: AuthManagerOptions 
       return Response.json({ error: "Forbidden" }, { status: 403 })
     }
 
+    const client = clientOf(req)
+    const waitSeconds = limiter?.blockedFor(client) ?? null
+    if (waitSeconds !== null) {
+      return Response.json({ error: "Too many attempts. Try again later." }, { status: 429, headers: { "Retry-After": String(waitSeconds) } })
+    }
     const { password: candidate, nextPath } = yield* readLoginForm(req)
     if (!verifyPassword(candidate)) {
+      limiter?.failed(client)
       return Response.json({ error: "Invalid password" }, { status: 401 })
     }
+    limiter?.succeeded(client)
 
     const response = Response.json({ ok: true, nextPath: sanitizeNextPath(nextPath || fallbackNextPath) })
 

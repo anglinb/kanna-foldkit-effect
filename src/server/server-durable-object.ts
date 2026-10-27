@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { Context, Effect, Exit, Layer, Scope } from "effect"
 import type { AuthSessionStore } from "./auth"
 import { makeR2UploadBlobs, type R2BucketLike } from "./upload-blobs-r2"
+import { restoreHome, snapshotHome, type SnapshotBucket } from "./home-snapshot"
 import { runKanna } from "./effect/bridge"
 import { DURABLE_OBJECT_ROOT, makeDurableObjectPlatform, PRIMARY_PORT, type HibernationContext, type WorkersWebSocket } from "./platform/cloudflare"
 import { Machine } from "./platform/machine"
@@ -22,6 +23,11 @@ export interface DurableObjectKannaOptions {
   readonly defaultHome?: string
   /** Where uploads are kept, so attachments show while the runner is offline. */
   readonly uploads?: R2BucketLike
+  /**
+   * For a runner whose disk is wiped when it sleeps (a Cloudflare Container):
+   * its home is saved here and put back on each fresh start.
+   */
+  readonly homeSnapshots?: { readonly bucket: SnapshotBucket; readonly prefix: string }
 }
 
 export interface DurableObjectKanna {
@@ -51,11 +57,13 @@ export interface DurableObjectKanna {
  * share tunnels) are off: the object is already hosted.
  */
 export async function startKannaInDurableObject(options: DurableObjectKannaOptions): Promise<DurableObjectKanna> {
+  const snapshots = options.homeSnapshots
   const { http, layer } = makeDurableObjectPlatform({
     sql: options.sql,
     hibernation: options.hibernation,
     runner: options.runner,
     ...(options.defaultHome ? { defaultHome: options.defaultHome } : {}),
+    ...(snapshots ? { onConnected: (machine) => restoreHome(snapshots.bucket, snapshots.prefix).pipe(Effect.provideContext(machine)) } : {}),
   })
   const scope = await runKanna(Scope.make())
   const close = () => runKanna(Scope.close(scope, Exit.void))
@@ -74,6 +82,8 @@ export async function startKannaInDurableObject(options: DurableObjectKannaOptio
       password: options.password,
       // Sessions outlive the server: it stops every time the object sleeps.
       authSessions: sqliteAuthSessions(options.sql),
+      // The password is the only gate in front of the object.
+      loginRateLimit: { windowMs: 15 * 60_000, maxFailuresPerClient: 10, maxFailuresTotal: 100 },
       // The runner took its login shell's PATH when it started.
       inheritShellPath: false,
       discoverInBackground: true,
@@ -83,6 +93,22 @@ export async function startKannaInDurableObject(options: DurableObjectKannaOptio
       cloudEnabled: false,
       disabledProviders: ["pi"],
     }).pipe(Effect.provideContext(platform)))
+    const saveHome = () => snapshots
+      ? runKanna(snapshotHome(snapshots.bucket, snapshots.prefix).pipe(
+        Effect.provideContext(platform),
+        Effect.catchCause((cause) => Effect.logWarning("couldn't save the machine's home", cause)),
+        Effect.asVoid,
+      ))
+      : Promise.resolve()
+    // While awake, the home is saved every so often: the container can be
+    // lost without warning, and this bounds what goes with it.
+    if (snapshots) {
+      await runKanna(Effect.promise(saveHome).pipe(
+        Effect.delay(HOME_SNAPSHOT_INTERVAL),
+        Effect.forever,
+        Effect.forkIn(scope),
+      ))
+    }
     // Sockets that stayed open while the object slept get this server now,
     // so its pushes reach them without waiting for them to speak first.
     await http.restoreSockets()
@@ -94,6 +120,9 @@ export async function startKannaInDurableObject(options: DurableObjectKannaOptio
       activity: () => started.activity(),
       stop: async () => {
         try {
+          // Before the runner connection goes: this is the last chance to
+          // save the home before the container sleeps and loses its disk.
+          await saveHome()
           await started.stop()
         } finally {
           await close()
@@ -106,6 +135,8 @@ export async function startKannaInDurableObject(options: DurableObjectKannaOptio
   }
 }
 
+
+const HOME_SNAPSHOT_INTERVAL = "15 minutes"
 
 /** Signed-in sessions in the object's SQLite, by the token's hash (never the token itself). */
 function sqliteAuthSessions(sql: SqlRunner): AuthSessionStore {

@@ -8,7 +8,7 @@ import type { AgentProvider, EditorPreset, TerminalPreset } from "../shared/type
 import type { ShareMode } from "../shared/share"
 import { SERVER_CAPABILITIES_PATH, capabilitiesForCloud } from "../shared/server-capabilities"
 import { readRuntimePolicy } from "./runtime-policy"
-import { type AuthSessionStore, createAuthManager } from "./auth"
+import { type AuthSessionStore, createAuthManager, type LoginRateLimit } from "./auth"
 import type { UploadBlobStore } from "./uploads"
 import type { CloudRuntime } from "./cloud"
 import { CloudFeature, isCloudPath } from "./cloud/feature"
@@ -171,6 +171,8 @@ export interface StartKannaServerOptions {
    * files in each project's `.kanna/uploads` (the local default).
    */
   uploadBlobs?: UploadBlobStore
+  /** Caps wrong passwords (see auth.ts). For a server on the public internet. */
+  loginRateLimit?: LoginRateLimit
   /** Where password sessions live (default: memory). A host that restarts often keeps them in storage. */
   authSessions?: AuthSessionStore
   /** Harnesses this host can't run, left out of every picker (the hosted build has no Pi). */
@@ -225,7 +227,11 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
   // awaited before anything can start an agent.
   const shellPathReady = yield* Effect.forkChild(options.inheritShellPath === false ? Effect.void : inheritShellPath())
   const auth = options.password
-    ? createAuthManager(options.password, { trustProxy: options.trustProxy ?? false, ...(options.authSessions ? { sessions: options.authSessions } : {}) })
+    ? createAuthManager(options.password, {
+      trustProxy: options.trustProxy ?? false,
+      ...(options.authSessions ? { sessions: options.authSessions } : {}),
+      ...(options.loginRateLimit ? { loginRateLimit: options.loginRateLimit } : {}),
+    })
     : null
   const dataDir = options.dataDir ?? getDataDir(machine.homeDirectory)
   // Services already on Effect, built once and released at shutdown. The

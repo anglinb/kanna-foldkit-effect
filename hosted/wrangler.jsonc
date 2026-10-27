@@ -5,8 +5,9 @@
   //   bun run build:client                      # dist/client
   //   wrangler dev -c hosted/wrangler.jsonc     # local workerd
   //
-  // Secrets: KANNA_RUNNER_URL, KANNA_RUNNER_TOKEN, KANNA_PASSWORD
-  // (`wrangler secret put`, or hosted/.dev.vars for `wrangler dev`).
+  // Secrets: KANNA_RUNNER_TOKEN, KANNA_PASSWORD (`wrangler secret put`, or
+  // hosted/.dev.vars for `wrangler dev`). KANNA_RUNNER_URL only for a runner
+  // outside Cloudflare; without it the RUNNER container is the machine.
   "name": "kanna-hosted",
   "main": "worker.ts",
   "compatibility_date": "2026-10-01",
@@ -29,9 +30,25 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/ws", "/health", "/auth/*", "/api/*", "/__cloud/*"]
   },
-  // Chat attachments: kept here so they show while the runner is offline
-  // (the runner gets a copy for the agents).
-  "r2_buckets": [{ "binding": "KANNA_UPLOADS", "bucket_name": "kanna-uploads" }],
-  "durable_objects": { "bindings": [{ "name": "KANNA", "class_name": "KannaHost" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KannaHost"] }]
+  // Uploads (so attachments show while the runner is offline) and the
+  // runner container's home (its disk is wiped whenever it sleeps).
+  "r2_buckets": [{ "binding": "KANNA_BUCKET", "bucket_name": "kanna-agent" }],
+  // The machine: hosted/runner/Dockerfile, built from the repo root.
+  "containers": [{
+    "class_name": "KannaRunner",
+    "image": "./runner/Dockerfile",
+    "image_build_context": "..",
+    "instance_type": "standard-2",
+    "max_instances": 1
+  }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "KANNA", "class_name": "KannaHost" },
+      { "name": "RUNNER", "class_name": "KannaRunner" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["KannaHost"] },
+    { "tag": "v2", "new_sqlite_classes": ["KannaRunner"] }
+  ]
 }

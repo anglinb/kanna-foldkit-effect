@@ -1,20 +1,29 @@
+import { Container } from "@cloudflare/containers"
 import { DurableObject } from "cloudflare:workers"
 import { TEXT_PING, TEXT_PONG } from "../src/shared/protocol"
+import { RUNNER_RPC_PATH, RUNNER_TOKEN_PARAM } from "../src/server/platform/remote/protocol"
 import type { DurableObjectKanna } from "../src/server/server-durable-object"
 
 /**
  * Hosted Kanna on Cloudflare: this Worker serves the built client as static
  * assets and hands everything the server answers (the WebSocket, /api, auth)
  * to one Durable Object, where Kanna's server runs with its state in the
- * object's SQLite. The machine — repos, agent CLIs, terminals — is a runner
- * in a container, reached over `KANNA_RUNNER_URL`.
+ * object's SQLite. The machine — repos, agent CLIs, terminals — is a runner:
+ * the `KannaRunner` Container below, or one elsewhere at `KANNA_RUNNER_URL`.
  */
 export interface Env {
   readonly KANNA: DurableObjectNamespace<KannaHost>
   readonly ASSETS: Fetcher
-  /** Uploads (chat attachments), so they show while the runner is offline. */
-  readonly KANNA_UPLOADS?: R2Bucket
-  readonly KANNA_RUNNER_URL: string
+  /** The runner as a Cloudflare Container. Used unless KANNA_RUNNER_URL names one elsewhere. */
+  readonly RUNNER?: DurableObjectNamespace<KannaRunner>
+  /**
+   * Kanna's blobs: uploads (`uploads/`), so attachments show while the runner
+   * is offline, and the Container's home (`homes/`), which its disk loses
+   * every time it sleeps.
+   */
+  readonly KANNA_BUCKET?: R2Bucket
+  /** A runner outside Cloudflare (a laptop, a VM), instead of the Container. */
+  readonly KANNA_RUNNER_URL?: string
   readonly KANNA_RUNNER_TOKEN: string
   readonly KANNA_PASSWORD: string
   /** The runner's home directory, used until it first connects. Default /home/kanna (the runner image). */
@@ -61,16 +70,20 @@ export class KannaHost extends DurableObject<Env> {
     // Loaded here, not at the top: the server's modules generate ids and arm
     // timers as they load, which workerd allows only inside a handler.
     this.kanna ??= import("../src/server/server-durable-object").then(({ startKannaInDurableObject }) => {
-      for (const name of ["KANNA_RUNNER_URL", "KANNA_RUNNER_TOKEN", "KANNA_PASSWORD"] as const) {
+      for (const name of ["KANNA_RUNNER_TOKEN", "KANNA_PASSWORD"] as const) {
         if (!this.env[name]) throw new Error(`${name} is not set`)
       }
+      const inContainer = !this.env.KANNA_RUNNER_URL
+      if (inContainer && !this.env.RUNNER) throw new Error("Set KANNA_RUNNER_URL, or bind the RUNNER container")
       return startKannaInDurableObject({
         sql: this.ctx.storage.sql,
         hibernation: this.ctx,
-        runner: { url: this.env.KANNA_RUNNER_URL, token: this.env.KANNA_RUNNER_TOKEN },
+        runner: inContainer ? { connect: () => this.connectToContainer(), label: "the runner container" } : { url: this.env.KANNA_RUNNER_URL!, token: this.env.KANNA_RUNNER_TOKEN },
         password: this.env.KANNA_PASSWORD,
         ...(this.env.KANNA_RUNNER_HOME ? { defaultHome: this.env.KANNA_RUNNER_HOME } : {}),
-        ...(this.env.KANNA_UPLOADS ? { uploads: this.env.KANNA_UPLOADS } : {}),
+        ...(this.env.KANNA_BUCKET ? { uploads: this.env.KANNA_BUCKET } : {}),
+        // A Container's disk doesn't outlive it sleeping: its home is kept in R2.
+        ...(inContainer && this.env.KANNA_BUCKET ? { homeSnapshots: { bucket: this.env.KANNA_BUCKET, prefix: "homes/default" } } : {}),
       })
     }).then((kanna) => {
       this.armIdleCheck()
@@ -81,6 +94,16 @@ export class KannaHost extends DurableObject<Env> {
       throw error
     })
     return this.kanna
+  }
+
+  /** A WebSocket to the runner's RPC endpoint in the Container, which starts it if it isn't running. */
+  private async connectToContainer() {
+    const url = `http://runner${RUNNER_RPC_PATH}?${RUNNER_TOKEN_PARAM}=${encodeURIComponent(this.env.KANNA_RUNNER_TOKEN)}`
+    const response = await this.env.RUNNER!.getByName("default").fetch(url, { headers: { Upgrade: "websocket" } })
+    const ws = response.webSocket
+    if (!ws) throw new Error(`the runner container refused the connection (${response.status} ${await response.text()})`)
+    ws.accept()
+    return ws as unknown as import("effect/socket").Socket.WebSocketLike
   }
 
   private touch() {
@@ -163,6 +186,23 @@ export class KannaHost extends DurableObject<Env> {
   override async alarm() {
     this.touch()
     await this.start()
+  }
+}
+
+/**
+ * The runner (hosted/runner/Dockerfile) as a Cloudflare Container: the
+ * machine Kanna's agents work on. Its disk is wiped whenever it sleeps, so
+ * KannaHost saves its home to R2 and restores it on each fresh start. It
+ * stays up while KannaHost holds its socket, and sleeps a while after.
+ */
+export class KannaRunner extends Container<Env> {
+  override defaultPort = 7420
+  override sleepAfter = "10m"
+  override enableInternet = true
+
+  constructor(ctx: DurableObjectState<{}>, env: Env) {
+    super(ctx, env)
+    this.envVars = { KANNA_RUNNER_TOKEN: env.KANNA_RUNNER_TOKEN }
   }
 }
 

@@ -28,6 +28,23 @@ describe("createAuthManager.handleLogin", () => {
     expect(await fromForm.json()).toEqual({ ok: true, nextPath: "/" })
   })
 
+  test("with a rate limit, blocks a client after too many wrong passwords, and the total too", async () => {
+    const auth = createAuthManager("secret", { loginRateLimit: { windowMs: 60_000, maxFailuresPerClient: 3, maxFailuresTotal: 5 } })
+    const attempt = (password: string, ip: string) =>
+      runTest(auth.handleLogin(login(JSON.stringify({ password }), "application/json", { "cf-connecting-ip": ip }), "/"))
+    for (let index = 0; index < 3; index += 1) expect((await attempt("nope", "1.1.1.1")).status).toBe(401)
+    // Blocked, even with the right password, until the window passes.
+    const blocked = await attempt("secret", "1.1.1.1")
+    expect(blocked.status).toBe(429)
+    expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0)
+    // Another client still gets in; a success clears its own count.
+    expect((await attempt("secret", "2.2.2.2")).status).toBe(200)
+    // Failures from many clients add up to the total cap.
+    expect((await attempt("nope", "3.3.3.3")).status).toBe(401)
+    expect((await attempt("nope", "4.4.4.4")).status).toBe(401)
+    expect((await attempt("secret", "5.5.5.5")).status).toBe(429)
+  })
+
   test("refuses a wrong, missing, or non-string password", async () => {
     const auth = createAuthManager("secret")
     for (const body of [{ password: "secrex" }, {}, { password: ["secret"] }, "secret", 7]) {

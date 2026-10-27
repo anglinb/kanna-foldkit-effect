@@ -12,7 +12,7 @@
 # (KANNA_RUNNER_HOME).
 
 # ── Build: the runner as one file, no node_modules at run time ──────────────
-FROM oven/bun:1 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1 AS build
 WORKDIR /src
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts

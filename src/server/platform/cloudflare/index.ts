@@ -2,7 +2,7 @@ import { Context, Effect, FileSystem, Layer, Path } from "effect"
 import { KannaLoggerLayer } from "../../effect/logger"
 import { FileSystemExtras } from "../file-system-extras"
 import { HttpHost } from "../http-host"
-import type { MachineFacts } from "../remote/client"
+import type { MachineFacts, RemoteMachineServices } from "../remote/client"
 import type { RunnerEndpoint } from "../remote/connection"
 import { RemoteMachinePlatform } from "../remote/host-platform"
 import { makeSqliteFileSystem, type SqlRunner } from "../sqlite-file-system"
@@ -32,6 +32,11 @@ export function makeDurableObjectPlatform(options: {
   readonly runner: RunnerEndpoint
   /** The runner's home before it has ever connected: the container image's. */
   readonly defaultHome?: string
+  /**
+   * Restores each new connection's machine before it is used: for a runner
+   * whose disk is wiped when it sleeps (a Cloudflare Container).
+   */
+  readonly onConnected?: (machine: Context.Context<RemoteMachineServices>) => Effect.Effect<void, unknown>
 }) {
   const http = makeDurableObjectHttpHost({ hibernation: options.hibernation, sql: options.sql })
   const facts = machineFactsStore(options.sql)
@@ -63,6 +68,7 @@ export function makeDurableObjectPlatform(options: {
         ptyAvailable: true,
       },
       onFacts: facts.write,
+      ...(options.onConnected ? { onConnected: options.onConnected } : {}),
       routes: { hostRoots: [DURABLE_OBJECT_ROOT] },
     }).pipe(Layer.provideMerge(host)),
   }
