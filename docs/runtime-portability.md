@@ -319,7 +319,8 @@ Providers (the login flows run on the runner's PTY) or with `docker exec -it
 kanna-runner claude`. `hosted/runner/setup.sh` installs the same tools on a
 Debian/Ubuntu machine without Docker.
 
-Deploying is `wrangler deploy -c hosted/wrangler.jsonc` with the secrets set
+Deploying is `wrangler r2 bucket create kanna-uploads` once, then
+`wrangler deploy -c hosted/wrangler.jsonc` with the secrets set
 (`KANNA_RUNNER_URL`, `KANNA_RUNNER_TOKEN`, `KANNA_PASSWORD`; optionally
 `KANNA_RUNNER_HOME`, `KANNA_IDLE_SECONDS`), and a runner the object can
 reach over `wss://`: a container next to it, or `cloudflared` in front of a
@@ -341,6 +342,13 @@ laptop's runner.
   replays their subscriptions, and handles the message (~30-90 ms with the
   runner up). Password sessions are kept in SQLite, so a sleep signs no one
   out.
+- **Uploads** (chat attachments) live in R2 (`KANNA_UPLOADS`, key
+  `uploads/<projectId>/<name>`), so they show while the runner is offline
+  and can be uploaded then too. The runner gets a copy in the project's
+  `.kanna/uploads`, where agents read them; one uploaded while it was
+  offline is copied over when a turn that uses it starts
+  (`ensureUploadsOnMachine`). Uploads from before R2 are served off the
+  machine as before. Local Kanna has no store and is unchanged.
 - **Pi** is left out of the hosted build (`disabledProviders`, and its SDK
   aliased to a stub): it runs its tools in-process, which here would be
   inside the object.

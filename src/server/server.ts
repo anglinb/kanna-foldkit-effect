@@ -9,6 +9,7 @@ import type { ShareMode } from "../shared/share"
 import { SERVER_CAPABILITIES_PATH, capabilitiesForCloud } from "../shared/server-capabilities"
 import { readRuntimePolicy } from "./runtime-policy"
 import { type AuthSessionStore, createAuthManager } from "./auth"
+import type { UploadBlobStore } from "./uploads"
 import type { CloudRuntime } from "./cloud"
 import { CloudFeature, isCloudPath } from "./cloud/feature"
 import { cloudFeatureLayer } from "./cloud/layer"
@@ -164,6 +165,12 @@ export interface StartKannaServerOptions {
    * trip away, where discovery is slow.
    */
   discoverInBackground?: boolean
+  /**
+   * Where uploads are kept apart from the machine (hosted: R2), so
+   * attachments show while it's offline. Without one, uploads are only the
+   * files in each project's `.kanna/uploads` (the local default).
+   */
+  uploadBlobs?: UploadBlobStore
   /** Where password sessions live (default: memory). A host that restarts often keeps them in storage. */
   authSessions?: AuthSessionStore
   /** Harnesses this host can't run, left out of every picker (the hosted build has no Pi). */
@@ -448,6 +455,7 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
   }
   const agent = new AgentCoordinator({
     platform,
+    ...(options.uploadBlobs ? { uploadBlobs: options.uploadBlobs } : {}),
     managedMcp,
     providerAccounts,
     store,
@@ -738,7 +746,7 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
           const cloudResponse = await runKanna(cloudFeature.handleRequest(req))
           if (cloudResponse) return withOriginAgentCluster(cloudResponse)
 
-          const uploadResponse = await runKanna(handleProjectUploadEffect(req, url, store).pipe(Effect.provide(platform)))
+          const uploadResponse = await runKanna(handleProjectUploadEffect(req, url, store, options.uploadBlobs ?? null).pipe(Effect.provide(platform)))
           if (uploadResponse) {
             return withOriginAgentCluster(uploadResponse)
           }
@@ -748,12 +756,12 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
             return withOriginAgentCluster(transcribeResponse)
           }
 
-          const deleteUploadResponse = await runKanna(handleProjectUploadDeleteEffect(req, url, store).pipe(Effect.provide(platform)))
+          const deleteUploadResponse = await runKanna(handleProjectUploadDeleteEffect(req, url, store, options.uploadBlobs ?? null).pipe(Effect.provide(platform)))
           if (deleteUploadResponse) {
             return withOriginAgentCluster(deleteUploadResponse)
           }
 
-          const attachmentContentResponse = await runKanna(handleAttachmentContentEffect(req, url, store).pipe(Effect.provide(platform)))
+          const attachmentContentResponse = await runKanna(handleAttachmentContentEffect(req, url, store, options.uploadBlobs ?? null).pipe(Effect.provide(platform)))
           if (attachmentContentResponse) {
             return withOriginAgentCluster(attachmentContentResponse)
           }

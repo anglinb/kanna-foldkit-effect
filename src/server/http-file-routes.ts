@@ -13,6 +13,8 @@ import {
   inferProjectFileContentType,
   persistProjectUpload,
   type PersistProjectUploadArgs,
+  uploadBlobKey,
+  type UploadBlobStore,
 } from "./uploads"
 
 const MAX_UPLOAD_FILES = 50
@@ -44,6 +46,7 @@ export const persistHttpUploadedFiles = Effect.fn("HttpFileRoutes.persistUploade
   localPath: string
   files: File[]
   persistUpload?: (upload: PersistProjectUploadArgs) => Promise<ChatAttachment>
+  blobs?: UploadBlobStore | null
 }) {
   yield* Effect.annotateCurrentSpan("projectId", args.projectId)
   const attachments: ChatAttachment[] = []
@@ -59,6 +62,7 @@ export const persistHttpUploadedFiles = Effect.fn("HttpFileRoutes.persistUploade
         fileName: file.name,
         bytes,
         fallbackMimeType: file.type || undefined,
+        blobs: args.blobs ?? null,
       }
       attachments.push(yield* (args.persistUpload
         ? Effect.tryPromise({
@@ -73,12 +77,13 @@ export const persistHttpUploadedFiles = Effect.fn("HttpFileRoutes.persistUploade
       Effect.exit(deleteProjectUpload({
         localPath: args.localPath,
         storedName: path.basename(attachment.absolutePath),
+        blobs: args.blobs ? { store: args.blobs, projectId: args.projectId } : null,
       })), { concurrency: "unbounded" }).pipe(Effect.asVoid)
     : Effect.void))
 })
 
 export const handleProjectUpload = Effect.fn("HttpFileRoutes.handleProjectUpload")(function* (
-  req: Request, url: URL, store: Pick<EventStore["Service"], "getProject">,
+  req: Request, url: URL, store: Pick<EventStore["Service"], "getProject">, blobs: UploadBlobStore | null = null,
 ) {
   if (req.method !== "POST") return null
   const match = url.pathname.match(/^\/api\/projects\/([^/]+)\/uploads$/)
@@ -134,7 +139,7 @@ export const handleProjectUpload = Effect.fn("HttpFileRoutes.handleProjectUpload
   }
 
   // Any failure, a crash included, is the JSON 500 with its diagnostic detail.
-  const result = yield* Effect.exit(persistHttpUploadedFiles({ projectId: project.id, localPath: project.localPath, files }))
+  const result = yield* Effect.exit(persistHttpUploadedFiles({ projectId: project.id, localPath: project.localPath, files, blobs }))
   if (Exit.isSuccess(result)) return Response.json({ attachments: result.value })
   if (Cause.hasInterruptsOnly(result.cause)) return yield* Effect.failCause(result.cause)
   const failure = Cause.squash(result.cause)
@@ -159,7 +164,7 @@ const isRegularFile = Effect.fn("HttpFileRoutes.isRegularFile")(function* (fileP
 })
 
 export const handleAttachmentContent = Effect.fn("HttpFileRoutes.handleAttachmentContent")(function* (
-  req: Request, url: URL, store: Pick<EventStore["Service"], "getProject">,
+  req: Request, url: URL, store: Pick<EventStore["Service"], "getProject">, blobs: UploadBlobStore | null = null,
 ) {
   const match = url.pathname.match(/^\/api\/projects\/([^/]+)\/uploads\/([^/]+)\/content$/)
   if (!match) return null
@@ -168,6 +173,12 @@ export const handleAttachmentContent = Effect.fn("HttpFileRoutes.handleAttachmen
   if (!project) return Response.json({ error: "Project not found" }, { status: 404 })
   const storedName = decodeURIComponent(match[2])
   if (invalidStoredName(storedName)) return Response.json({ error: "Invalid attachment path" }, { status: 400 })
+  // The stored copy first: it's there when the machine isn't. Uploads from
+  // before there was a store are only on the machine.
+  const stored = blobs ? yield* blobs.get(uploadBlobKey(project.id, storedName)).pipe(Effect.orElseSucceed(() => null)) : null
+  if (stored) {
+    return new Response(stored.body, { headers: { "Content-Type": inferAttachmentContentType(storedName, stored.contentType) } })
+  }
   const filePath = path.join(getProjectUploadDir(project.localPath, (yield* Machine).homeDirectory), storedName)
   if (!(yield* isRegularFile(filePath))) return Response.json({ error: "Attachment not found" }, { status: 404 })
   const files = yield* FileSystemExtras
@@ -234,7 +245,7 @@ export const handleProjectFileContent = Effect.fn("HttpFileRoutes.handleProjectF
 })
 
 export const handleProjectUploadDelete = Effect.fn("HttpFileRoutes.handleProjectUploadDelete")(function* (
-  req: Request, url: URL, store: Pick<EventStore["Service"], "getProject">,
+  req: Request, url: URL, store: Pick<EventStore["Service"], "getProject">, blobs: UploadBlobStore | null = null,
 ) {
   if (req.method !== "DELETE") return null
   const match = url.pathname.match(/^\/api\/projects\/([^/]+)\/uploads\/([^/]+)$/)
@@ -243,7 +254,7 @@ export const handleProjectUploadDelete = Effect.fn("HttpFileRoutes.handleProject
   if (!project) return Response.json({ error: "Project not found" }, { status: 404 })
   const storedName = decodeURIComponent(match[2])
   if (invalidStoredName(storedName)) return Response.json({ error: "Invalid attachment path" }, { status: 400 })
-  const deleted = yield* deleteProjectUpload({ localPath: project.localPath, storedName })
+  const deleted = yield* deleteProjectUpload({ localPath: project.localPath, storedName, blobs: blobs ? { store: blobs, projectId: project.id } : null })
   return Response.json({ ok: deleted })
 })
 

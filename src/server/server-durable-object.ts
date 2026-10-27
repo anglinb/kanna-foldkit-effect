@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { Context, Effect, Exit, Layer, Scope } from "effect"
 import type { AuthSessionStore } from "./auth"
+import { makeR2UploadBlobs, type R2BucketLike } from "./upload-blobs-r2"
 import { runKanna } from "./effect/bridge"
 import { DURABLE_OBJECT_ROOT, makeDurableObjectPlatform, PRIMARY_PORT, type HibernationContext, type WorkersWebSocket } from "./platform/cloudflare"
 import { Machine } from "./platform/machine"
@@ -19,6 +20,8 @@ export interface DurableObjectKannaOptions {
   readonly password: string
   /** The runner's home before it first connects (default `/home/kanna`, the runner image's). */
   readonly defaultHome?: string
+  /** Where uploads are kept, so attachments show while the runner is offline. */
+  readonly uploads?: R2BucketLike
 }
 
 export interface DurableObjectKanna {
@@ -74,6 +77,7 @@ export async function startKannaInDurableObject(options: DurableObjectKannaOptio
       // The runner took its login shell's PATH when it started.
       inheritShellPath: false,
       discoverInBackground: true,
+      ...(options.uploads ? { uploadBlobs: makeR2UploadBlobs(options.uploads) } : {}),
       // The Worker in front terminates TLS and forwards the request as-is.
       trustProxy: true,
       cloudEnabled: false,

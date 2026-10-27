@@ -12,6 +12,8 @@ import type { DurableObjectKanna } from "../src/server/server-durable-object"
 export interface Env {
   readonly KANNA: DurableObjectNamespace<KannaHost>
   readonly ASSETS: Fetcher
+  /** Uploads (chat attachments), so they show while the runner is offline. */
+  readonly KANNA_UPLOADS?: R2Bucket
   readonly KANNA_RUNNER_URL: string
   readonly KANNA_RUNNER_TOKEN: string
   readonly KANNA_PASSWORD: string
@@ -68,6 +70,7 @@ export class KannaHost extends DurableObject<Env> {
         runner: { url: this.env.KANNA_RUNNER_URL, token: this.env.KANNA_RUNNER_TOKEN },
         password: this.env.KANNA_PASSWORD,
         ...(this.env.KANNA_RUNNER_HOME ? { defaultHome: this.env.KANNA_RUNNER_HOME } : {}),
+        ...(this.env.KANNA_UPLOADS ? { uploads: this.env.KANNA_UPLOADS } : {}),
       })
     }).then((kanna) => {
       this.armIdleCheck()

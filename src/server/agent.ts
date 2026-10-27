@@ -49,6 +49,7 @@ import { makeGrokCli, type GrokCli } from "./grok-cli"
 import { openHarnessTurn } from "./harness-bridge"
 import { PiAgentManager, piDataDir, resolvePiConnection } from "./pi-agent"
 import { claudeCodeProcessSpawner } from "./claude-process"
+import { ensureUploadsOnMachine, type UploadBlobStore } from "./uploads"
 import { Machine, type MachineEnv } from "./platform/machine"
 import { type GenerateChatTitleResult, generateTitleForChatDetailed } from "./generate-title"
 import { QuickResponse, withSharedQuickResponse } from "./quick-response"
@@ -363,6 +364,11 @@ interface ClaudeSessionState {
 }
 
 interface AgentCoordinatorArgs {
+  /**
+   * Where uploads are kept apart from the machine (hosted). A turn copies its
+   * attachments back to the machine from here when they're missing there.
+   */
+  uploadBlobs?: UploadBlobStore
   providerAccounts?: ProviderAccounts["Service"]
   managedMcp?: ManagedMcp["Service"]
   /** The native service; a `{ service }` wrapper remains accepted for older test fixtures. */
@@ -1166,6 +1172,7 @@ export class AgentCoordinator {
   private readonly grokManager: GrokCli["Service"]
   private readonly piManager: PiAgentManager
   private readonly platform: Context.Context<PlatformServices>
+  private readonly uploadBlobs: UploadBlobStore | null
   private readonly machine: Machine["Service"]
   private readonly ownsPiManager: boolean
   private readonly resolvePiConnectionEffect: () => Effect.Effect<import("./pi-agent").PiConnection | null, Error>
@@ -1249,6 +1256,7 @@ export class AgentCoordinator {
     this.onStateChange = args.onStateChange
     this.analytics = args.analytics ?? NoopAnalytics
     this.platform = args.platform
+    this.uploadBlobs = args.uploadBlobs ?? null
     this.codexManager = args.codexManager ?? createCodexAppServer(args.platform)
     this.codexManager.setTaskActivityListener((chatId, update) => this.applySubagentActivity(chatId, update))
     this.cursorManager = args.cursorManager ?? runKannaSync(makeCursorCli().pipe(Effect.provide(args.platform)))
@@ -2298,6 +2306,14 @@ export class AgentCoordinator {
 
     if (shouldGenerateTitle) {
       self.forkBackground(self.generateTitleInBackgroundEffect(args.chatId, args.content, project.localPath, optimisticTitle ?? "New Chat"))
+    }
+
+    // Attachments uploaded while the machine was offline are only in the
+    // store; the agent reads them from disk.
+    if (self.uploadBlobs && args.attachments.length > 0) {
+      yield* ensureUploadsOnMachine({ blobs: self.uploadBlobs, projectId: project.id, localPath: project.localPath, attachments: args.attachments }).pipe(
+        Effect.provide(self.platform),
+      )
     }
 
     const onToolRequest = (request: HarnessToolRequest) => self.requestToolInput(args.chatId, request)
