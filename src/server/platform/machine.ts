@@ -30,6 +30,12 @@ export class ProcessSignalError extends Schema.TaggedError<ProcessSignalError>()
  * except `env` (see `MachineEnv`) and `hostname`.
  */
 export class Machine extends Context.Service<Machine, {
+  /**
+   * True when the machine isn't the computer this server runs on (a runner
+   * in a container). Code that can only reach this computer by itself (the
+   * Claude SDK's own spawn) checks it to go through the platform instead.
+   */
+  readonly remote?: boolean
   readonly platform: NodeJS.Platform
   readonly arch: string
   readonly homeDirectory: string

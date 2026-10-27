@@ -57,6 +57,7 @@ export const makeRemoteMachineLayer = (client: MachineClient): Layer.Layer<Remot
       Effect.runFork(client.MachineSetEnv(value === undefined ? { name } : { name, value }).pipe(Effect.ignore))
 
     const machine = Machine.of({
+      remote: true,
       platform: info.platform as NodeJS.Platform,
       arch: info.arch,
       homeDirectory: info.homeDirectory,

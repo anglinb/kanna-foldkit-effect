@@ -48,6 +48,7 @@ import { makeCursorCli, type CursorCli } from "./cursor-cli"
 import { makeGrokCli, type GrokCli } from "./grok-cli"
 import { openHarnessTurn } from "./harness-bridge"
 import { PiAgentManager, piDataDir, resolvePiConnection } from "./pi-agent"
+import { claudeCodeProcessSpawner } from "./claude-process"
 import { Machine, type MachineEnv } from "./platform/machine"
 import { type GenerateChatTitleResult, generateTitleForChatDetailed } from "./generate-title"
 import { QuickResponse, withSharedQuickResponse } from "./quick-response"
@@ -1064,9 +1065,9 @@ async function startClaudeSession(args: {
       settings: { enableWorkflows: true, fastMode: args.serviceTier === "fast" },
       pathToClaudeCodeExecutable: claudeExecutable.path,
       env: (() => { const { CLAUDECODE: _, ...env } = { ...machine.env.snapshot(), ...args.environment }; return env })(),
-      // The SDK spawns `claude` itself, on this computer. A binding whose
-      // machine is elsewhere would hand it `spawnClaudeCodeProcess`, backed by
-      // that machine's `ProcessSpawner`.
+      // The SDK spawns `claude` itself, on this computer. When the machine is
+      // elsewhere, `claude` starts there, through its `ProcessSpawner`.
+      ...(machine.remote ? { spawnClaudeCodeProcess: claudeCodeProcessSpawner(args.platform) } : {}),
     },
   })
   if (args.signal?.aborted) {
