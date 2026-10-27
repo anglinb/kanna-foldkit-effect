@@ -1,6 +1,7 @@
-import { Effect, Exit, Layer, Scope } from "effect"
+import { Context, Effect, Exit, Layer, Scope } from "effect"
 import { runKanna } from "./effect/bridge"
-import { makeDurableObjectPlatform, PRIMARY_PORT } from "./platform/cloudflare"
+import { DURABLE_OBJECT_ROOT, makeDurableObjectPlatform, PRIMARY_PORT } from "./platform/cloudflare"
+import { Machine } from "./platform/machine"
 import type { RunnerEndpoint } from "./platform/remote/connection"
 import type { SqlRunner } from "./platform/sqlite-file-system"
 import { startKannaServerEffect } from "./server"
@@ -12,6 +13,8 @@ export interface DurableObjectKannaOptions {
   readonly runner: RunnerEndpoint
   /** Required: a Durable Object is on the public internet. */
   readonly password: string
+  /** The runner's home before it first connects (default `/home/kanna`, the runner image's). */
+  readonly defaultHome?: string
 }
 
 export interface DurableObjectKanna {
@@ -30,20 +33,26 @@ export interface DurableObjectKanna {
  * share tunnels) are off: the object is already hosted.
  */
 export async function startKannaInDurableObject(options: DurableObjectKannaOptions): Promise<DurableObjectKanna> {
-  const { http, layer } = makeDurableObjectPlatform({ sql: options.sql, runner: options.runner })
+  const { http, layer } = makeDurableObjectPlatform({ sql: options.sql, runner: options.runner, ...(options.defaultHome ? { defaultHome: options.defaultHome } : {}) })
   const scope = await runKanna(Scope.make())
   const close = () => runKanna(Scope.close(scope, Exit.void))
   const startedAt = Date.now()
   try {
     const platform = await runKanna(Layer.buildWithScope(layer, scope))
+    const machineHome = Context.get(platform, Machine).homeDirectory
     const started = await runKanna(startKannaServerEffect({
       port: PRIMARY_PORT,
       host: "0.0.0.0",
       strictPort: true,
+      dataDir: `${DURABLE_OBJECT_ROOT}/data`,
+      keybindingsPath: `${DURABLE_OBJECT_ROOT}/keybindings.json`,
+      // On the machine: the CLIs there read them.
+      accountsDir: `${machineHome}/.kanna/accounts`,
       password: options.password,
       // The Worker in front terminates TLS and forwards the request as-is.
       trustProxy: true,
       cloudEnabled: false,
+      disabledProviders: ["pi"],
     }).pipe(Effect.provideContext(platform)))
     console.log(`[kanna] hosted server started in ${Date.now() - startedAt}ms`)
     return {

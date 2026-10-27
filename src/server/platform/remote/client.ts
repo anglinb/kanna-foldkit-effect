@@ -1,8 +1,8 @@
-import { ByteSize, Cause, Context, Deferred, Effect, FileSystem, Layer, Option, Queue, Ref, Stream } from "effect"
+import { ByteSize, Cause, Context, Deferred, Effect, FileSystem, Option, Queue, Ref, Stream } from "effect"
 import type { RpcClient, RpcClientError, RpcGroup } from "effect/rpc"
 import mime from "mime-types"
 import { FileSystemExtras } from "../file-system-extras"
-import { Machine, ProcessSignalError } from "../machine"
+import { Machine, type MachineEnv, ProcessSignalError } from "../machine"
 import {
   CommandSpawnError,
   ProcessSpawner,
@@ -17,12 +17,44 @@ import type { MachineRpcs, WireStdin } from "./protocol"
 
 export type MachineClient = RpcClient.RpcClient<RpcGroup.Rpcs<typeof MachineRpcs>, RpcClientError.RpcClientError>
 
+/** What the runner reports about its machine (`MachineInfo`), plus whether it has PTYs. */
+export interface MachineFacts {
+  readonly platform: string
+  readonly arch: string
+  readonly homeDirectory: string
+  readonly tmpDirectory: string
+  readonly workingDirectory: string
+  readonly hostname: string
+  readonly env: Readonly<Record<string, string>>
+  readonly ptyAvailable: boolean
+}
+
+/**
+ * The host's side of a runner connection (`connection.ts`): the current
+ * client, the machine's facts and its environment. While the runner is
+ * unreachable, `client`'s calls fail at once with `MachineOfflineError`
+ * and the facts are the last ones it reported.
+ */
+export interface RunnerLink {
+  readonly client: MachineClient
+  readonly facts: () => MachineFacts
+  /** The host's copy of the machine's environment, kept in step with the runner's. */
+  readonly env: MachineEnv
+}
+
+/** The runner can't be reached right now. */
+export class MachineOfflineError extends Error {
+  constructor(readonly operation: string) {
+    super("The machine is offline")
+    this.name = "MachineOfflineError"
+  }
+}
+
 /**
  * What a host sees when the machine is a runner somewhere else: the same
  * `Machine`, `ProcessSpawner`, `PtySpawner`, `FileSystem` and
- * `FileSystemExtras` the Bun bindings provide, each call forwarded over
- * `client`. Built once per connection; `MachineInfo` is read up front
- * because `Machine`'s facts are synchronous.
+ * `FileSystemExtras` the Bun bindings provide, each call forwarded over the
+ * link's current connection.
  */
 export type RemoteMachineServices = Machine | ProcessSpawner | PtySpawner | FileSystem.FileSystem | FileSystemExtras
 
@@ -32,7 +64,13 @@ const LOST_EXIT: ProcessExit = { code: 137, exitCode: null, signalCode: "SIGKILL
 const encoder = new TextEncoder()
 
 const lostConnection = (command: string) => (cause: unknown) =>
-  new CommandSpawnError({ command, message: `Lost the connection to the machine running ${command}`, cause })
+  new CommandSpawnError({
+    command,
+    message: cause instanceof MachineOfflineError
+      ? `Can't run ${command}: the machine is offline`
+      : `Lost the connection to the machine running ${command}`,
+    cause,
+  })
 
 /** A process RPC's error as the `CommandSpawnError` local spawns fail with. */
 const spawnFailure = (command: string) => (error: unknown) =>
@@ -44,46 +82,38 @@ function toWireStdin(stdin: ProcessStdin | undefined): WireStdin {
   return typeof stdin === "string" ? { text: stdin } : { bytes: stdin }
 }
 
-export const makeRemoteMachineLayer = (client: MachineClient): Layer.Layer<RemoteMachineServices, RpcClientError.RpcClientError> =>
-  Layer.effectContext(Effect.gen(function* () {
-    const info = yield* client.MachineInfo()
-    const ptyAvailable = yield* client.PtyAvailable()
+export function makeRemoteMachineContext(link: RunnerLink): Context.Context<RemoteMachineServices> {
+  const { client, env } = link
+  const facts = link.facts
 
-    // The host's copy of the machine's environment. Writes go to both: the
-    // copy is what spawns read (every spawn sends its whole env), the runner's
-    // is what its own `which` and shell lookups see.
-    const env: Record<string, string | undefined> = { ...info.env }
-    const mirror = (name: string, value?: string) =>
-      Effect.runFork(client.MachineSetEnv(value === undefined ? { name } : { name, value }).pipe(Effect.ignore))
-
-    const machine = Machine.of({
-      remote: true,
-      platform: info.platform as NodeJS.Platform,
-      arch: info.arch,
-      homeDirectory: info.homeDirectory,
-      tmpDirectory: info.tmpDirectory,
-      workingDirectory: info.workingDirectory,
-      hostname: () => info.hostname,
-      env: {
-        get: (name) => env[name],
-        snapshot: () => ({ ...env }),
-        set: (name, value) => {
-          env[name] = value
-          mirror(name, value)
-        },
-        unset: (name) => {
-          delete env[name]
-          mirror(name)
-        },
-      },
-      which: (command, options) => client.MachineWhich(options?.PATH !== undefined ? { command, PATH: options.PATH } : { command }).pipe(
-        Effect.orElseSucceed(() => null),
-      ),
-      userShell: client.MachineUserShell().pipe(Effect.orElseSucceed(() => null)),
-      signalProcess: (pid, signal) => client.MachineSignalProcess({ pid, signal }).pipe(
-        Effect.mapError((error) => error instanceof ProcessSignalError ? error : new ProcessSignalError({ pid, cause: error })),
-      ),
-    })
+  // Getters: a runner that reconnects after a restart can report new facts.
+  const machine = Machine.of({
+    remote: true,
+    get platform() {
+      return facts().platform as NodeJS.Platform
+    },
+    get arch() {
+      return facts().arch
+    },
+    get homeDirectory() {
+      return facts().homeDirectory
+    },
+    get tmpDirectory() {
+      return facts().tmpDirectory
+    },
+    get workingDirectory() {
+      return facts().workingDirectory
+    },
+    hostname: () => facts().hostname,
+    env,
+    which: (command, options) => client.MachineWhich(options?.PATH !== undefined ? { command, PATH: options.PATH } : { command }).pipe(
+      Effect.orElseSucceed(() => null),
+    ),
+    userShell: client.MachineUserShell().pipe(Effect.orElseSucceed(() => null)),
+    signalProcess: (pid, signal) => client.MachineSignalProcess({ pid, signal }).pipe(
+      Effect.mapError((error) => error instanceof ProcessSignalError ? error : new ProcessSignalError({ pid, cause: error })),
+    ),
+  })
 
     const spawner = ProcessSpawner.of({
       spawn: Effect.fn("RemoteProcessSpawner.spawn")(function* (argv: ReadonlyArray<string>, options: ProcessSpawnOptions = {}) {
@@ -93,11 +123,11 @@ export const makeRemoteMachineLayer = (client: MachineClient): Layer.Layer<Remot
         const events = yield* client.ProcessSpawn({
           argv: [...argv],
           ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
-          env: definedEnv(options.env ?? env),
+          env: definedEnv(options.env ?? env.snapshot()),
           stdin: toWireStdin(options.stdin),
           stdout: options.stdout ?? "ignore",
           stderr: options.stderr ?? "ignore",
-        }, { asQueue: true })
+        }, { asQueue: true }).pipe(Effect.mapError(fail))
         const started = yield* Queue.take(events).pipe(Effect.mapError(fail))
         if (started._tag !== "Started") return yield* fail(new Error(`expected Started, got ${started._tag}`))
         const { handle } = started
@@ -149,7 +179,9 @@ export const makeRemoteMachineLayer = (client: MachineClient): Layer.Layer<Remot
     })
 
     const ptys = PtySpawner.of({
-      available: ptyAvailable,
+      get available() {
+        return facts().ptyAvailable
+      },
       spawn: Effect.fn("RemotePtySpawner.spawn")(function* (argv: ReadonlyArray<string>, options: PtySpawnOptions) {
         const command = argv[0] ?? ""
         yield* Effect.annotateCurrentSpan("command", command)
@@ -157,11 +189,11 @@ export const makeRemoteMachineLayer = (client: MachineClient): Layer.Layer<Remot
         const events = yield* client.PtySpawn({
           argv: [...argv],
           ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
-          env: definedEnv(options.env ?? env),
+          env: definedEnv(options.env ?? env.snapshot()),
           cols: options.cols,
           rows: options.rows,
           ...(options.name !== undefined ? { name: options.name } : {}),
-        }, { asQueue: true })
+        }, { asQueue: true }).pipe(Effect.mapError(fail))
         const started = yield* Queue.take(events).pipe(Effect.mapError(fail))
         if (started._tag !== "Started") return yield* fail(new Error(`expected Started, got ${started._tag}`))
         const { handle } = started
@@ -304,4 +336,4 @@ export const makeRemoteMachineLayer = (client: MachineClient): Layer.Layer<Remot
       Context.add(FileSystem.FileSystem, FileSystem.FileSystem.of({ ...fs, stream })),
       Context.add(FileSystemExtras, extras),
     )
-  }))
+}

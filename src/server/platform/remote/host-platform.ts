@@ -2,16 +2,21 @@ import { Context, Effect, FileSystem, Layer } from "effect"
 import { getDataDir, getDataRootDir } from "../../../shared/branding"
 import { FileSystemExtras } from "../file-system-extras"
 import { Machine } from "../machine"
-import { makeRoutedFileSystem } from "../routed-file-system"
-import { RemoteMachineLayer, type RunnerEndpoint } from "./connection"
+import { makeRoutedFileSystem, type PathRoutes } from "../routed-file-system"
+import { RemoteMachineLayer, type RemoteMachineOptions } from "./connection"
 
-export interface RemoteMachinePlatformOptions {
-  readonly runner: RunnerEndpoint
+export interface RemoteMachinePlatformOptions extends RemoteMachineOptions {
   /**
    * Host paths besides the data root that stay with the host: the built
    * client and export viewer the server serves.
    */
   readonly hostRoots?: ReadonlyArray<string>
+  /**
+   * Replaces the default routes (the data root named from the machine's
+   * home, minus its account dirs). A host whose data dir has a fixed path of
+   * its own (a Durable Object) routes just that.
+   */
+  readonly routes?: PathRoutes
 }
 
 /**
@@ -31,10 +36,10 @@ export const RemoteMachinePlatform = (options: RemoteMachinePlatformOptions) =>
   Layer.effectContext(Effect.gen(function* () {
     const hostFs = yield* FileSystem.FileSystem
     const hostExtras = yield* FileSystemExtras
-    const remote = yield* Layer.build(RemoteMachineLayer(options.runner))
+    const remote = yield* Layer.build(RemoteMachineLayer(options))
     const machine = Context.get(remote, Machine)
     const routed = makeRoutedFileSystem(
-      {
+      options.routes ?? {
         hostRoots: [getDataRootDir(machine.homeDirectory), ...(options.hostRoots ?? [])],
         machineRoots: [`${getDataDir(machine.homeDirectory)}/accounts`],
       },

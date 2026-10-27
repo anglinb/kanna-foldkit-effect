@@ -18,7 +18,7 @@ const remote = Layer.unwrap(Effect.gen(function* () {
   yield* serveRunner({ token: TOKEN })
   const server = yield* HttpServer.HttpServer
   const port = (server.address as { readonly port: number }).port
-  return RemoteMachineLayer({ url: `ws://127.0.0.1:${port}`, token: TOKEN })
+  return RemoteMachineLayer({ runner: { url: `ws://127.0.0.1:${port}`, token: TOKEN } })
 })).pipe(Layer.provide(Layer.merge(BunHttpServer.layer({ port: 0, hostname: "127.0.0.1" }), BunPlatform)))
 
 type Remote = Layer.Success<typeof remote>
@@ -136,6 +136,46 @@ describe("remote machine", () => {
     expect(decoder.decode(Option.getOrThrow(chunk))).toBe("3456")
     expect(Number((yield* file.stat).size)).toBe(10)
   })))
+
+  test("starts from last-known facts with no runner, and fails calls at once", async () => {
+    const lastKnown = { platform: "linux", arch: "x64", homeDirectory: "/home/kanna", tmpDirectory: "/tmp", workingDirectory: "/home/kanna", hostname: "runner", env: { PATH: "/usr/bin" }, ptyAvailable: true }
+    // Nothing listens on port 9: every connection attempt fails.
+    const offline = RemoteMachineLayer({ runner: { url: "ws://127.0.0.1:9", token: TOKEN }, lastKnown })
+    await Effect.runPromise(Effect.gen(function* () {
+      const machine = yield* Machine
+      expect(machine.homeDirectory).toBe("/home/kanna")
+      expect(machine.env.get("PATH")).toBe("/usr/bin")
+      const started = Date.now()
+      const spawnError = yield* Effect.flip((yield* ProcessSpawner).spawn(["git", "status"]))
+      expect(spawnError.message).toBe("Can't run git: the machine is offline")
+      const readError = yield* Effect.flip((yield* FileSystem.FileSystem).readFileString("/home/kanna/repo/README.md"))
+      expect(readError.reason._tag).toBe("Unknown")
+      expect(Date.now() - started).toBeLessThan(500)
+    }).pipe(Effect.scoped, Effect.provide(offline)))
+  })
+
+  test("connects once a runner appears", async () => {
+    const lastKnown = { platform: "linux", arch: "x64", homeDirectory: "/home/kanna", tmpDirectory: "/tmp", workingDirectory: "/home/kanna", hostname: "runner", env: {}, ptyAvailable: true }
+    const port = 20000 + Math.floor(Math.random() * 20000)
+    const late = RemoteMachineLayer({ runner: { url: `ws://127.0.0.1:${port}`, token: TOKEN }, lastKnown })
+    let runner: Fiber.Fiber<unknown, unknown> | undefined
+    try {
+      await Effect.runPromise(Effect.gen(function* () {
+        const machine = yield* Machine
+        expect(machine.homeDirectory).toBe("/home/kanna")
+        // The runner starts after the host.
+        runner = Effect.runFork(Effect.scoped(serveRunner({ token: TOKEN }).pipe(Effect.andThen(Effect.never))).pipe(
+          Effect.provide(Layer.merge(BunHttpServer.layer({ port, hostname: "127.0.0.1" }), BunPlatform)),
+        ))
+        for (let attempt = 0; attempt < 100 && machine.homeDirectory === "/home/kanna"; attempt += 1) yield* Effect.sleep("100 millis")
+        expect(machine.homeDirectory).toBe(require("node:os").homedir())
+        const proc = yield* (yield* ProcessSpawner).spawn(["echo", "back"], { stdout: "pipe" })
+        expect(yield* collect(proc.stdout)).toBe("back\n")
+      }).pipe(Effect.scoped, Effect.provide(late)))
+    } finally {
+      if (runner) await Effect.runPromise(Fiber.interrupt(runner))
+    }
+  }, 20000)
 
   test("rejects a host without the token", async () => {
     const program = Effect.gen(function* () {

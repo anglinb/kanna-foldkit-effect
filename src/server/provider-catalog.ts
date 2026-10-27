@@ -52,6 +52,16 @@ function createServerProviders(): ProviderCatalogEntry[] {
 
 export const SERVER_PROVIDERS: ProviderCatalogEntry[] = createServerProviders()
 
+/**
+ * Drops harnesses this server can't run (Pi in the hosted build), so pickers
+ * never offer them.
+ */
+export function removeServerProviders(ids: ReadonlyArray<ProviderCatalogEntry["id"]>) {
+  for (let index = SERVER_PROVIDERS.length - 1; index >= 0; index -= 1) {
+    if (ids.includes(SERVER_PROVIDERS[index]!.id)) SERVER_PROVIDERS.splice(index, 1)
+  }
+}
+
 export function resetServerProvidersForTests() {
   SERVER_PROVIDERS.splice(0, SERVER_PROVIDERS.length, ...createServerProviders())
 }

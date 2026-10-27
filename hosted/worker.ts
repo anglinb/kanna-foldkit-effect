@@ -14,6 +14,8 @@ export interface Env {
   readonly KANNA_RUNNER_URL: string
   readonly KANNA_RUNNER_TOKEN: string
   readonly KANNA_PASSWORD: string
+  /** The runner's home directory, used until it first connects. Default /home/kanna (the runner image). */
+  readonly KANNA_RUNNER_HOME?: string
 }
 
 /** Paths Kanna's server answers; everything else is the client bundle. */
@@ -33,6 +35,7 @@ export class KannaHost extends DurableObject<Env> {
         sql: this.ctx.storage.sql,
         runner: { url: this.env.KANNA_RUNNER_URL, token: this.env.KANNA_RUNNER_TOKEN },
         password: this.env.KANNA_PASSWORD,
+        ...(this.env.KANNA_RUNNER_HOME ? { defaultHome: this.env.KANNA_RUNNER_HOME } : {}),
       })
     }).catch((error: unknown) => {
       // The next request tries again (the runner may have been down).

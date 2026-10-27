@@ -19,7 +19,9 @@
     "@opentelemetry/api": "./stubs/opentelemetry-api.ts",
     // The Claude SDK reads the CLI's output through readline, which workerd
     // doesn't implement (see the stub).
-    "readline": "./stubs/readline.ts"
+    "readline": "./stubs/readline.ts",
+    // Not in the hosted build: see the stub.
+    "@mariozechner/pi-coding-agent": "./stubs/pi-coding-agent.ts"
   },
   "assets": {
     "directory": "../dist/client",

@@ -4,7 +4,7 @@ import { Effect, Fiber, Layer, ManagedRuntime, Option, Result, Schema, Scope } f
 import { PerformanceLog } from "./performance-log"
 import path from "node:path"
 import { getDataDir, getRuntimeProfile, LOG_PREFIX } from "../shared/branding"
-import type { EditorPreset, TerminalPreset } from "../shared/types"
+import type { AgentProvider, EditorPreset, TerminalPreset } from "../shared/types"
 import type { ShareMode } from "../shared/share"
 import { SERVER_CAPABILITIES_PATH, capabilitiesForCloud } from "../shared/server-capabilities"
 import { readRuntimePolicy } from "./runtime-policy"
@@ -54,7 +54,7 @@ import {
   serveStatic as serveStaticEffect,
 } from "./http-file-routes"
 import { handleVisualizationHeights } from "./visualization-heights"
-import { applyPiFaveModels } from "./provider-catalog"
+import { applyPiFaveModels, removeServerProviders } from "./provider-catalog"
 import { LatestVersionError, ProviderAuth } from "./provider-auth"
 import { fetchLatestPackageVersion, type CliUpdateOptions } from "./cli-runtime"
 import { getMachineDisplayName } from "./machine-name"
@@ -146,6 +146,14 @@ export interface StartKannaServerOptions {
   /** Where keybindings live. Defaults to the user's home; tests point it at a temp dir. */
   keybindingsPath?: string
   update?: Pick<CliUpdateOptions, "version" | "fetchLatestVersion" | "installVersion" | "installNightly">
+  /**
+   * Where managed accounts' CLI config dirs go (default `<dataDir>/accounts`).
+   * The CLIs read them, so this is a path on the machine; a host whose data
+   * dir isn't (a Durable Object) puts them elsewhere.
+   */
+  accountsDir?: string
+  /** Harnesses this host can't run, left out of every picker (the hosted build has no Pi). */
+  disabledProviders?: ReadonlyArray<AgentProvider>
 }
 
 type AgentStartupPort = CoordinatorLike & Pick<AgentCoordinator,
@@ -183,6 +191,7 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
   const machine = yield* Machine
   const http = yield* HttpHost
   const cloudEnabled = (yield* readRuntimePolicy(options.cloudEnabled)).cloudEnabled
+  if (options.disabledProviders?.length) removeServerProviders(options.disabledProviders)
   if (!cloudEnabled && (options.directCloud || options.share)) {
     return yield* new ServerStartupError({ operation: "cloud policy", cause: new Error("Cloud is disabled; hosted mode and public sharing are unavailable.") })
   }
@@ -276,7 +285,7 @@ export const startKannaServerEffect = Effect.fn("Server.start")(function* (optio
     Layer.mergeAll(
       Keybindings.layer(options.keybindingsPath),
       ManagedMcp.layer(dataDir),
-      ProviderAccounts.layer(dataDir).pipe(Layer.provideMerge(providerAuthLayer)),
+      ProviderAccounts.layer(dataDir, options.accountsDir ? { accountsDir: options.accountsDir } : {}).pipe(Layer.provideMerge(providerAuthLayer)),
       CursorCli.layer(),
       GrokCli.layer(),
       PiAgent.layer(),

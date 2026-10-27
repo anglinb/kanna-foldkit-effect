@@ -50,10 +50,12 @@ export class ProviderAccounts extends Context.Service<ProviderAccounts, {
   readonly cancelLogin: (id: string) => Effect.Effect<void, AccountError>
   readonly runtime: (provider: AgentProvider, id?: string) => Effect.Effect<AccountRuntime, AccountError>
 }>()("@kanna/server/ProviderAccounts") {
-  static readonly layer = (dataDir: string) => Layer.effect(this, makeProviderAccounts(dataDir))
+  /** `accountsDir`: where each account's CLI config dir goes (default `<dataDir>/accounts`); it has to be on the machine. */
+  static readonly layer = (dataDir: string, options: { readonly accountsDir?: string } = {}) =>
+    Layer.effect(this, makeProviderAccounts(dataDir, {}, options.accountsDir))
 }
 
-export const makeProviderAccounts = Effect.fn("ProviderAccounts.make")(function* (dataDir: string, nativeAuthOptions: ProviderAuthOptions = {}) {
+export const makeProviderAccounts = Effect.fn("ProviderAccounts.make")(function* (dataDir: string, nativeAuthOptions: ProviderAuthOptions = {}, accountsDir?: string) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const machine = yield* Machine
@@ -84,7 +86,8 @@ export const makeProviderAccounts = Effect.fn("ProviderAccounts.make")(function*
     return yield* new AccountError({ message: "Invalid default account storage." })
   }
   const auths = new Map<string, { auth: ProviderAuth["Service"]; scope: Scope.Closeable }>()
-  const directory = (entry: SavedAccount) => path.join(dataDir, "accounts", entry.id, entry.provider)
+  const accountsRoot = accountsDir ?? path.join(dataDir, "accounts")
+  const directory = (entry: SavedAccount) => path.join(accountsRoot, entry.id, entry.provider)
   const get = (id: string) => saved.find((entry) => entry.id === id)
   const requireSaved = (id: string) => Effect.suspend(() => { const entry = get(id); return entry ? Effect.succeed(entry) : Effect.fail(new AccountError({ message: "Account not found." })) })
   const persist = (accounts: SavedAccount[], nextDefaults = defaults) => Effect.gen(function* () {
@@ -215,7 +218,7 @@ export const makeProviderAccounts = Effect.fn("ProviderAccounts.make")(function*
       const child = auths.get(id)
       if (child) { yield* Scope.close(child.scope, Exit.void); auths.delete(id) }
       yield* persist(saved.filter((value) => value.id !== id), Object.fromEntries(Object.entries(defaults).filter(([, value]) => value !== id)))
-      yield* fs.remove(path.join(dataDir, "accounts", id), { recursive: true, force: true }).pipe(Effect.ignore)
+      yield* fs.remove(path.join(accountsRoot, id), { recursive: true, force: true }).pipe(Effect.ignore)
     })),
     submitCode: (id, code) => Effect.gen(function* () { const entry = yield* requireSaved(id); const auth = yield* nativeAuth(entry); yield* auth.submitLoginCode(entry.provider as AuthServiceId, code).pipe(Effect.mapError(() => new AccountError({ message: "No account sign-in is waiting for a code." }))) }),
     cancelLogin: (id) => Effect.gen(function* () { const entry = yield* requireSaved(id); const auth = yield* nativeAuth(entry); yield* auth.cancelLogin(entry.provider as AuthServiceId) }),
