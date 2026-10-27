@@ -56,6 +56,7 @@ const PROCESS_ENTRY_POINTS: Record<string, string> = {
   "instance-socket.ts": "single-instance coordination over a local unix socket",
   "effect/main.ts": "runs a kanna process's program and exits with its code",
   "server-bun.ts": "starts the server on Bun, finding dist/ from its own location",
+  "runner-bun.ts": "the runner's main: argv, its token from the env, the Bun bindings",
 }
 
 /**
@@ -65,6 +66,7 @@ const PROCESS_ENTRY_POINTS: Record<string, string> = {
  */
 const BUN_COMPOSITION_ROOTS: Record<string, string> = {
   "effect/runtime.ts": "ServerPlatform: the Bun bindings plus the logger",
+  "runner-bun.ts": "serves the runner with the Bun bindings",
   "event-store-bridge.ts": "Promise face of the event store, kept for tests",
   "orchestrator-bridge.ts": "Promise face of the orchestrator, kept for tests",
 }
