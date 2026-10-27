@@ -1,0 +1,76 @@
+name: Deploy hosted Kanna
+
+# Deploys hosted/ (the Worker, the KannaHost Durable Object and the
+# KannaRunner Container) to Cloudflare. Runs on a push to `hosted-deploy`
+# (git push origin <ref>:hosted-deploy), or by hand once this file is on the
+# default branch.
+#
+# Everything account-specific comes from repository secrets, so it stays out
+# of the repo and is masked in these (public) logs:
+#   CLOUDFLARE_API_TOKEN   Account: Workers Scripts, Workers R2 Storage and
+#                          Containers: Edit; Zone (the domain's): Workers Routes: Edit
+#   CLOUDFLARE_ACCOUNT_ID
+#   KANNA_HOSTED_DOMAIN    e.g. agent.example.com, a zone in that account
+#   KANNA_PASSWORD         the only gate in front of it
+#   KANNA_RUNNER_TOKEN     what the Durable Object presents to the runner
+# One-time setup: wrangler r2 bucket create kanna-agent
+on:
+  push:
+    branches: [hosted-deploy]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-hosted
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - run: bun install --frozen-lockfile
+
+      # The client the Worker serves as static assets.
+      - run: bun run build:client
+
+      - name: Write the Worker's secrets
+        env:
+          KANNA_PASSWORD: ${{ secrets.KANNA_PASSWORD }}
+          KANNA_RUNNER_TOKEN: ${{ secrets.KANNA_RUNNER_TOKEN }}
+        run: |
+          test -n "$KANNA_PASSWORD" && test -n "$KANNA_RUNNER_TOKEN"
+          umask 077
+          node -e 'console.log(JSON.stringify({ KANNA_PASSWORD: process.env.KANNA_PASSWORD, KANNA_RUNNER_TOKEN: process.env.KANNA_RUNNER_TOKEN }))' > "$RUNNER_TEMP/kanna-secrets.json"
+
+      # Builds and pushes the runner image (hosted/runner/Dockerfile) too.
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          KANNA_HOSTED_DOMAIN: ${{ secrets.KANNA_HOSTED_DOMAIN }}
+        run: |
+          ./node_modules/.bin/wrangler deploy -c hosted/wrangler.jsonc \
+            --domain "$KANNA_HOSTED_DOMAIN" \
+            --secrets-file "$RUNNER_TEMP/kanna-secrets.json"
+
+      - name: Check it answers, and only behind the password
+        env:
+          KANNA_HOSTED_DOMAIN: ${{ secrets.KANNA_HOSTED_DOMAIN }}
+        run: |
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://$KANNA_HOSTED_DOMAIN/health" || true)
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+          test "$code" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "https://$KANNA_HOSTED_DOMAIN/ws")" = "401"
+
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/kanna-secrets.json"
