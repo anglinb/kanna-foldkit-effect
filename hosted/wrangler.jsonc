@@ -12,6 +12,8 @@
   "main": "worker.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
+  // Halves the upload (7.8 MB → 4.2 MB).
+  "minify": true,
   // The Claude Agent SDK builds a `require` from import.meta.url as it loads;
   // a Worker bundle has none.
   "define": { "import.meta.url": "\"file:///bundle/worker.js\"" },
